@@ -1,0 +1,26 @@
+# 构建产物
+/zshtrans.exe
+/dist/
+/.tmp/
+*.exe
+
+# 前端依赖（node_modules 不入库）
+/frontend/node_modules/
+/frontend/dist/
+# 注意：internal/web/dist/ 必须入库——它是 go:embed 的编译输入，
+# 不提交会导致 clone 后 `go build` 直接失败（embed 找不到 dist）。
+
+# 本地状态
+/tt_config.json
+/tt_phrases.json
+/zshtrans.log
+
+# 编辑器/系统
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
+# 备份/中间文件
+*.bak-*
+*.tsbuildinfo
