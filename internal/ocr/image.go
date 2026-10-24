@@ -10,8 +10,9 @@ import (
 
 // Candidate 一个预处理候选图（对应 pyc _ocr_candidates）
 type Candidate struct {
-	Name string
-	PNG  []byte
+	Name  string
+	PNG   []byte
+	Scale float64 // 相对原图的放大倍数（用于失败诊断，原图/二值图为 1）
 }
 
 // Decode 解码 PNG/JPEG 为 RGBA
@@ -177,23 +178,23 @@ func Scale(img image.Image, factor int) image.Image {
 func Candidates(img image.Image) []Candidate {
 	out := make([]Candidate, 0, 3)
 	if raw, err := EncodePNG(img); err == nil {
-		out = append(out, Candidate{Name: "raw", PNG: raw})
+		out = append(out, Candidate{Name: "raw", PNG: raw, Scale: 1})
 	}
 	if raw, err := EncodePNG(BinaryWhiteBg(img)); err == nil {
-		out = append(out, Candidate{Name: "binary", PNG: raw})
+		out = append(out, Candidate{Name: "binary", PNG: raw, Scale: 1})
 	}
 	// 只在原图偏小时才加放大候选：大图放大 4 倍像素既慢、OCR 侧也会被压缩回去，
 	// 收益接近零（原 pyc 无脑加，是速度上的主要开销）。
 	b := img.Bounds()
 	if b.Dx() < 720 && b.Dy() < 520 {
 		if raw, err := EncodePNG(Scale(img, 2)); err == nil {
-			out = append(out, Candidate{Name: "scaled", PNG: raw})
+			out = append(out, Candidate{Name: "scaled", PNG: raw, Scale: 2})
 		}
 	}
 	if len(out) == 0 {
 		// 极端情况下退化为原字节
 		if raw, err := EncodePNG(img); err == nil {
-			out = append(out, Candidate{Name: "raw", PNG: raw})
+			out = append(out, Candidate{Name: "raw", PNG: raw, Scale: 1})
 		}
 	}
 	return out

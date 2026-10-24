@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -157,13 +158,15 @@ func safeCall(fn providers.Func, text, src, tgt string) (out string, err error) 
 	return fn(text, src, tgt)
 }
 
-// stableSortByHealth 健康者优先，保持原有相对顺序
+// stableSortByHealth 健康者优先，保持原有相对顺序。
+//
+// 必须按 key 稳定排序（对应 pyc `order.sort(key=lambda p: not p.healthy())`）。
+// 原来的手写插入排序只在「前一个健康、当前不健康」时交换，等于只会把不健康的
+// 往右推一格，无法把排在队首的不健康节点挪到后面——顺序不对，首选节点仍是坏的。
 func stableSortByHealth(list []*providers.Provider) {
-	for i := 1; i < len(list); i++ {
-		for j := i; j > 0 && !list[j].Healthy() && list[j-1].Healthy(); j-- {
-			list[j], list[j-1] = list[j-1], list[j]
-		}
-	}
+	sort.SliceStable(list, func(i, j int) bool {
+		return list[i].Healthy() && !list[j].Healthy()
+	})
 }
 
 // ---------- LRU 缓存（对应 pyc _cache_get/_cache_put，容量 300） ----------

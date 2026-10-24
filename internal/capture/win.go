@@ -9,6 +9,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/local/zshtrans/internal/logx"
 )
 
 var (
@@ -138,11 +140,15 @@ func WriteClipboard(text string) error {
 
 // SelectedText 取当前选中文本（对应 capture_selected_text）
 // 流程：记序列号 → 发 Ctrl+C → 轮询剪贴板变化 → 读出文本 → 还原原剪贴板
+//
+// 剪贴板还原是原版承诺的行为（注释里写了"还原原剪贴板"），但原实现只把 before
+// 用来判空、从不写回，用户每划一次词就永久丢掉自己剪贴板里的东西。这里真的还原。
 func SelectedText(wait time.Duration) (string, error) {
 	before, _ := ReadClipboard()
 	seq := ClipboardSeq()
 	SendCtrlC()
 
+	grabbed := ""
 	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
 		time.Sleep(30 * time.Millisecond)
@@ -151,21 +157,29 @@ func SelectedText(wait time.Duration) (string, error) {
 		}
 		text, err := ReadClipboard()
 		if err != nil {
-			return "", err
+			continue
 		}
 		if text != "" {
-			return text, nil
+			grabbed = text
+			break
 		}
 	}
-	// 超时后尝试直接读，仍为空则报错
-	text, err := ReadClipboard()
-	if err != nil || text == "" {
+	if grabbed == "" {
+		// 超时后尝试直接读一次
+		if text, err := ReadClipboard(); err == nil && text != "" && text != before {
+			grabbed = text
+		}
+	}
+	// 无论成败都把用户原来的剪贴板内容写回去
+	if before != "" {
+		if err := WriteClipboard(before); err != nil {
+			logx.Warn("clipboard restore fail: %v", err)
+		}
+	}
+	if grabbed == "" {
 		return "", errors.New("no selection captured")
 	}
-	if text == before {
-		return "", errors.New("no selection captured")
-	}
-	return text, nil
+	return grabbed, nil
 }
 
 // Screenshot 全屏截图，返回 PNG 字节

@@ -58,7 +58,8 @@ var ErrUnavailable = errors.New("WebView2 运行时不可用")
 // ---------- Win32 ----------
 
 var (
-	user32 = windows.NewLazySystemDLL("user32.dll")
+	user32   = windows.NewLazySystemDLL("user32.dll")
+	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
 
 	procSetWindowLongPtrW   = user32.NewProc("SetWindowLongPtrW")
 	procCallWindowProcW     = user32.NewProc("CallWindowProcW")
@@ -68,6 +69,7 @@ var (
 	procIsWindowVisible     = user32.NewProc("IsWindowVisible")
 	procPostMessageW        = user32.NewProc("PostMessageW")
 	procFindWindowW         = user32.NewProc("FindWindowW")
+	procSetLastErr          = kernel32.NewProc("SetLastError")
 	procGetWindowTextW      = user32.NewProc("GetWindowTextW")
 	procSetWindowTextW      = user32.NewProc("SetWindowTextW")
 )
@@ -119,8 +121,19 @@ func subclass(hwnd uintptr, onClose func()) {
 		r, _, _ := procCallWindowProcW.Call(orig, h, msg, wp, lp)
 		return r
 	})
-	prev, _, _ := procSetWindowLongPtrW.Call(hwnd, gwlpWndProc, cb)
-	if prev == 0 {
+	// SetWindowLongPtrW 返回 0 既可能是失败，也可能旧 wndproc 恰好是 0，
+	// 必须靠 LastError 区分。原来直接 `if prev == 0 { return }` 会把成功当失败，
+	// 而 wndProcOnce 已经占位、不重试 → 窗口过程永远没装上，点 X 关不掉窗口。
+	procSetLastErr.Call(0)
+	prev, _, callErr := procSetWindowLongPtrW.Call(hwnd, gwlpWndProc, cb)
+	if prev == 0 && callErr != nil && callErr != windows.ERROR_SUCCESS {
+		// 真失败：撤销占位，允许后续重试
+		wndProcOnce.Delete(hwnd)
+		subclassMu.Lock()
+		delete(closeHooks, hwnd)
+		subclassMu.Unlock()
+		// 装不上窗口过程不影响显示，只是点 X 会走系统默认关闭（销毁窗口）
+		_ = callErr
 		return
 	}
 	subclassMu.Lock()

@@ -5,11 +5,13 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/local/zshtrans/internal/logx"
 )
 
 const (
 	AppName    = "ZSH TRANS"
-	AppVersion = "v3.0"
+	AppVersion = "v3.1"
 	// 原 pyc 常量
 	Timeout  = 8
 	CacheMax = 300
@@ -136,20 +138,74 @@ func LogPath() string {
 	return filepath.Join(BaseDir(), "zshtrans.log")
 }
 
-// BaseDir exe 所在目录（开发时为工作目录）
+// BaseDir 数据目录：优先 exe 所在目录，不可写时退回用户配置目录。
+//
+// 单文件绿色版把配置放在 exe 旁边是原版行为，但装到 C:\Program Files 后
+// 该目录不可写，Save 会失败且只留一行 warn，用户以为设置保存了实际全丢。
+// 所以这里先探测可写性，不行就落到 %APPDATA%\ZSH TRANS。
+var (
+	baseDirOnce sync.Once
+	baseDirVal  string
+)
+
 func BaseDir() string {
+	baseDirOnce.Do(func() { baseDirVal = pickBaseDir() })
+	return baseDirVal
+}
+
+func pickBaseDir() string {
+	dir := exeDir()
+	if dir != "" && writable(dir) {
+		return dir
+	}
+	if fallback := userConfigDir(); fallback != "" {
+		if err := os.MkdirAll(fallback, 0o755); err == nil && writable(fallback) {
+			return fallback
+		}
+	}
+	if dir != "" {
+		return dir // 都不行时仍用 exe 目录，让 Save 的报错指向真实位置
+	}
+	wd, _ := os.Getwd()
+	return wd
+}
+
+// exeDir exe 所在目录；go run / 测试时 exe 在临时目录，退回工作目录
+func exeDir() string {
 	exe, err := os.Executable()
 	if err != nil {
-		wd, _ := os.Getwd()
-		return wd
+		return ""
 	}
 	dir := filepath.Dir(exe)
-	// go run / 测试时 exe 在临时目录，退回工作目录
-	if base := filepath.Base(dir); base == "go-build" || len(base) > 0 && base[0] == '0' && filepath.Base(filepath.Dir(dir)) == "go-build" {
+	base := filepath.Base(dir)
+	if base == "go-build" || (len(base) > 0 && base[0] == '0' && filepath.Base(filepath.Dir(dir)) == "go-build") {
 		wd, _ := os.Getwd()
 		return wd
 	}
 	return dir
+}
+
+// userConfigDir %APPDATA%\ZSH TRANS（Windows）或 $XDG_CONFIG_HOME/zshtrans
+func userConfigDir() string {
+	if base, err := os.UserConfigDir(); err == nil && base != "" {
+		return filepath.Join(base, AppName)
+	}
+	if appData := os.Getenv("APPDATA"); appData != "" {
+		return filepath.Join(appData, AppName)
+	}
+	return ""
+}
+
+// writable 探测目录能否落文件（真写一个临时文件再删，比查权限位可靠）
+func writable(dir string) bool {
+	f, err := os.CreateTemp(dir, ".wtest-*")
+	if err != nil {
+		return false
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	return true
 }
 
 // Store 内存态配置，支持热更新（对应 pyc 全局 CFG）
@@ -163,7 +219,40 @@ func NewStore(cfg Config) *Store { return &Store{cfg: cfg} }
 func (s *Store) Get() Config {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.cfg
+	return clone(s.cfg)
+}
+
+// clone 深拷贝配置里的切片/映射。
+//
+// Config 里 Providers []Provider（内含 Models []Model 等切片）是引用类型：
+// 浅拷贝后调用方 append/改元素会碰到 store 内部同一份底层数组，
+// 既绕过 applyMu 造成数据竞争，也可能把未保存的改动泄漏进当前配置。
+func clone(c Config) Config {
+	out := c
+	if c.Providers != nil {
+		out.Providers = make([]Provider, len(c.Providers))
+		for i, p := range c.Providers {
+			out.Providers[i] = cloneProvider(p)
+		}
+	}
+	return out
+}
+
+func cloneProvider(p Provider) Provider {
+	out := p
+	if p.Models != nil {
+		out.Models = make([]Model, len(p.Models))
+		copy(out.Models, p.Models)
+		for i := range out.Models {
+			if p.Models[i].ReasoningLevels != nil {
+				out.Models[i].ReasoningLevels = append([]string(nil), p.Models[i].ReasoningLevels...)
+			}
+			if p.Models[i].ThinkingTypes != nil {
+				out.Models[i].ThinkingTypes = append([]string(nil), p.Models[i].ThinkingTypes...)
+			}
+		}
+	}
+	return out
 }
 
 func (s *Store) Set(cfg Config) {
@@ -182,6 +271,11 @@ func Load() (Config, error) {
 	// 先填默认值再反序列化，缺失字段保持默认
 	cfg := def
 	if err := json.Unmarshal(raw, &cfg); err != nil {
+		// 坏 JSON：把原文件改名留档，避免下次 Save 用默认值把用户密钥整体覆盖掉
+		backup := Path() + ".bad"
+		if renameErr := os.Rename(Path(), backup); renameErr == nil {
+			logx.Warn("config corrupt, backed up to %s: %v", backup, err)
+		}
 		return def, err
 	}
 	cfg = normalize(cfg, def)
@@ -212,9 +306,6 @@ func normalize(cfg, def Config) Config {
 	}
 	if cfg.Web.Port == 0 {
 		cfg.Web.Port = def.Web.Port
-	}
-	if cfg.APIKeys.OCRSpace == "" {
-		cfg.APIKeys.OCRSpace = def.APIKeys.OCRSpace
 	}
 	// 原 install_language_support：src==tgt 时把 src 拉回 auto
 	if cfg.SrcLang == cfg.TgtLang {

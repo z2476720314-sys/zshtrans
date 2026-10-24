@@ -219,3 +219,41 @@
 | 15.8 | 局域网 IP 显示 | 顶栏直接显示 `局域网 192.168.x.x`，方便手机/另一台机器访问网页版 | `/api/lanip`、`frontend/src/App.tsx` |
 | 15.9 | 界面语向选择器左右分置 | 源语言下拉贴在左栏表头、目标语言贴在右栏表头，中间只留交换按钮——一眼看清方向，且控件比原版紧凑 | `frontend/src/pages/Translate.tsx` |
 | 15.10 | 日志带时间戳 | 每行 `YYYY-MM-DD HH:MM:SS ` 前缀，原版是裸 print | `internal/logx` |
+
+## 16. v3.1 加固（代码审查后修复的 20 条缺陷）
+
+本节记录的是「本版为修正确性/安全性而动的地方」，与第 15 章的「相对原版的新增」区分。
+每条都注明了原实现哪里错、现在怎么改、以及对应的验证点。
+
+### 16.1 全局热键的线程归属（高危）
+原实现 `RegisterHotKey(hWnd=0)` → 热键消息投递到**调用线程**的消息队列；注册发生在主 goroutine，
+消息泵却在另一个 `runtime.LockOSThread()` 的 goroutine 里 `GetMessageW`，而主 goroutine 紧接着进
+WebView2 的消息循环并 `DispatchMessage` 掉 `hwnd=NULL` 的 `WM_HOTKEY`。结果：四个热键全部静默失效。
+现实现把「注册 + 消息泵」放进同一个锁定的 OS 线程，`Rebind` 通过 `PostThreadMessageW(wmApp)` 触发重注册。
+验证：真实按键 → 日志出现 `hotkey fired: window` / `close`，窗口 `IsWindowVisible` 随按键翻转。
+
+### 16.2 更新包的完整性校验（高危）
+原实现只把流写进 `.part` 再改名，从不校验长度与文件格式。现补 `done == total`、非空、MZ 头、
+PE 签名四道检查；`Apply` 先 `move` 旧 exe 到 `.old`，`copy` 失败跳 `:rollback` 还原并重启旧版。
+
+### 16.3 监听地址与鉴权（高危）
+原实现默认 `0.0.0.0`、无任何鉴权，却对所有响应发 `Access-Control-Allow-Origin: *`。现补三层：
+`guardHost` 只放行 IP 字面量与 `localhost`（防 DNS rebinding）；`adminOnly` 把写操作与本地能力接口
+限制到回环来源；`allowedOrigin` 只回显本机/私网来源。验证：`Host: evil.example.com` → 403；
+`Origin: http://evil.example.com` → 响应无 ACAO 头。
+
+### 16.4 其余中危 12 条 / 低危 5 条
+见 `CHANGELOG.md` v3.1 段落逐条说明（含 `/api/ocr` 像素上限、`readBody` 不静默截断、百度 OCR
+token 的 data race、OCR 缓存键、坏配置留档、`ocrspace` 默认值不再复活、配置目录回退、
+剪贴板还原、更新脚本按 PID、`Store.Get` 深拷贝、`keyByRef` 去空白、`/api/test` 真实耗时、
+窗口子类化失败重试、HTTP 超时、`-console` 输出）。
+
+### 16.5 引擎健康度排序（测试发现的真实缺陷）
+原 `stableSortByHealth` 是手写插入排序，只在「前一个健康、当前不健康」时交换，等价于「把不健康的
+往右推一格」。排在队首的不健康节点永远不会被挪走，首选仍是坏的，与 pyc 的
+`order.sort(key=lambda p: not p.healthy())` 不等价。已改为 `sort.SliceStable`。
+
+### 16.6 单元测试
+45 个测试覆盖 `config` / `engine` / `hotkeys` / `lang` / `ocr` / `server` / `update`。
+其中 `server` 的 `guard_test.go` 是 16.3 的回归测试，`update_test.go` 的 `checkPE` 用合成字节
+而非真 exe，`ocr/image_test.go` 断言 Otsu 的**分隔效果**而非阈值数值（纯双峰图像的最优阈值本来就是 0）。

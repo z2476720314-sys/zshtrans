@@ -15,8 +15,13 @@ func (m *Manager) Bind(selection, screenshot, window, close string, handler func
 	return errors.New("global hotkeys only supported on windows")
 }
 
+// Rebind 热更新热键（不支持）
+func (m *Manager) Rebind(selection, screenshot, window, close string, handler func(name string)) error {
+	return m.Bind(selection, screenshot, window, close, handler)
+}
+
 // Start 启动消息循环
-func (m *Manager) Start() {}
+func (m *Manager) Start() error { return nil }
 
 // Stop 停止
 func (m *Manager) Stop() {}

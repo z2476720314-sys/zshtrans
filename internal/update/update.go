@@ -9,6 +9,7 @@
 package update
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -197,7 +198,53 @@ func Download(url, dest string, progress func(done, total int64)) error {
 		os.Remove(tmp)
 		return err
 	}
+	// 完整性校验：Content-Length 缺失或提前 EOF 时，截断的 exe 会被当成正式包
+	// 装上去并重启，且旧 exe 已被覆盖、无法回滚。这里两道都查。
+	if total > 0 && done != total {
+		os.Remove(tmp)
+		return fmt.Errorf("下载不完整：已收 %d / 共 %d 字节", done, total)
+	}
+	if done == 0 {
+		os.Remove(tmp)
+		return errors.New("下载内容为空")
+	}
+	// PE 头校验：至少要是个可执行文件，别把 404 页面存成 exe
+	if err := checkPE(tmp); err != nil {
+		os.Remove(tmp)
+		return err
+	}
 	return os.Rename(tmp, dest)
+}
+
+// checkPE 校验文件开头是 Windows PE（MZ + PE\0\0 签名）
+func checkPE(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	head := make([]byte, 64)
+	if _, err := io.ReadFull(f, head); err != nil {
+		return errors.New("下载内容不是有效的可执行文件（文件过短）")
+	}
+	if head[0] != 'M' || head[1] != 'Z' {
+		return errors.New("下载内容不是有效的可执行文件（缺少 MZ 头）")
+	}
+	off := int64(binary.LittleEndian.Uint32(head[0x3C:]))
+	if off <= 0 || off > 1<<20 {
+		return errors.New("下载内容不是有效的可执行文件（PE 偏移异常）")
+	}
+	if _, err := f.Seek(off, io.SeekStart); err != nil {
+		return err
+	}
+	sig := make([]byte, 4)
+	if _, err := io.ReadFull(f, sig); err != nil {
+		return errors.New("下载内容不是有效的可执行文件（PE 头缺失）")
+	}
+	if sig[0] != 'P' || sig[1] != 'E' || sig[2] != 0 || sig[3] != 0 {
+		return errors.New("下载内容不是有效的可执行文件（PE 签名错误）")
+	}
+	return nil
 }
 
 // Apply 把已下载的新 exe 换上并重启。当前进程应立即退出。
@@ -216,17 +263,30 @@ func Apply(newExe string) error {
 		return fmt.Errorf("新版本文件不存在：%w", err)
 	}
 
-	script := filepath.Join(os.TempDir(), "zshtrans-update.bat")
-	// /wait 让 taskkill 真正等；随后 copy /y 覆盖；start 重启；最后删批处理自身
+	// 唯一文件名：固定名在多个实例/连续两次更新时会互相覆盖，跑到一半的脚本被改掉
+	script := filepath.Join(os.TempDir(), fmt.Sprintf("zshtrans-update-%d.bat", os.Getpid()))
+	backup := self + ".old"
+	// 只杀自己这个 PID（按映像名 taskkill /im 会连带杀掉其他目录下同名的实例）
+	// copy 先备份再覆盖，失败时把备份还原回去，不让用户拿着半个 exe
 	content := strings.Join([]string{
 		"@echo off",
 		"chcp 65001 >nul",
 		"ping -n 3 127.0.0.1 >nul",
-		"taskkill /f /im " + filepath.Base(self) + " >nul 2>&1",
+		"taskkill /f /pid " + strconv.Itoa(os.Getpid()) + " >nul 2>&1",
 		"ping -n 2 127.0.0.1 >nul",
-		"copy /y \"" + newExe + "\" \"" + self + "\" >nul",
+		"if exist \"" + backup + "\" del /f /q \"" + backup + "\"",
+		"move /y \"" + self + "\" \"" + backup + "\" >nul 2>&1",
+		"copy /y \"" + newExe + "\" \"" + self + "\" >nul 2>&1",
+		"if errorlevel 1 goto rollback",
+		"del /f /q \"" + backup + "\" >nul 2>&1",
 		"start \"\" \"" + self + "\"",
 		"del \"%~f0\"",
+		"exit /b 0",
+		":rollback",
+		"if exist \"" + backup + "\" move /y \"" + backup + "\" \"" + self + "\" >nul 2>&1",
+		"start \"\" \"" + self + "\"",
+		"del \"%~f0\"",
+		"exit /b 1",
 	}, "\r\n")
 	if err := os.WriteFile(script, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("写入更新脚本失败：%w", err)

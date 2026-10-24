@@ -1,4 +1,4 @@
-# ZSH TRANS v3.0 · 跨境翻译台
+# ZSH TRANS v3.1 · 跨境翻译台
 
 俄 ↔ 中 ↔ 英跨境客服翻译工具。Go 后端 + React/Ant Design 前端，单文件 exe，无需安装 Python/Qt/运行库。
 

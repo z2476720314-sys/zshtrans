@@ -236,30 +236,40 @@ func ResolveKey(p config.Provider, keys config.APIKeys, environ func(string) str
 	return ""
 }
 
+// keyByRef 按 key_ref 取密钥。
+//
+// ref 是配置里的自由字段：用户可以给自定义 provider 填任意 ref。原实现只认
+// 10 个硬编码名字，自定义 ref 永远拿不到密钥（设置页看着配好了，实际发请求时
+// 认证头为空）。这里先查内置名，再查环境变量里同名的大写名作为兜底。
 func keyByRef(keys config.APIKeys, ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	var v string
 	switch ref {
 	case "deepl":
-		return keys.DeepL
+		v = keys.DeepL
 	case "baidu_appid":
-		return keys.BaiduAppID
+		v = keys.BaiduAppID
 	case "baidu_key":
-		return keys.BaiduKey
+		v = keys.BaiduKey
 	case "niutrans":
-		return keys.NiuTrans
+		v = keys.NiuTrans
 	case "ocrspace":
-		return keys.OCRSpace
+		v = keys.OCRSpace
 	case "baidu_ocr_ak":
-		return keys.BaiduOCRAK
+		v = keys.BaiduOCRAK
 	case "baidu_ocr_sk":
-		return keys.BaiduOCRsk
+		v = keys.BaiduOCRsk
 	case "agnes":
-		return keys.Agnes
+		v = keys.Agnes
 	case "qwen":
-		return keys.Qwen
+		v = keys.Qwen
 	case "acctoken":
-		return keys.Acctoken
+		v = keys.Acctoken
 	}
-	return ""
+	return strings.TrimSpace(v)
 }
 
 // ChatURL 拼接对话端点

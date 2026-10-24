@@ -48,6 +48,7 @@ func main() {
 	// -console 是排障手段，这里按需现挂一个，别让文档里的用法失效。
 	if *conOut {
 		console.Attach()
+		logx.EnableConsole()
 	}
 
 	logx.Init(config.LogPath())
@@ -118,6 +119,11 @@ func main() {
 		Addr:              addr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// 慢速攻击（slowloris）防护：只有 ReadHeaderTimeout 时，body 可以无限慢地传。
+		// 60s 足够覆盖 OCR 大图上传（24MB 上限），也比零值安全得多。
+		ReadTimeout: 60 * time.Second,
+		// SSE 长连接要保持，IdleTimeout 只影响 keep-alive 之间的空转
+		IdleTimeout: 120 * time.Second,
 	}
 
 	ln, err := net.Listen("tcp", addr)
@@ -163,6 +169,8 @@ func main() {
 	}()
 
 	// ---------- 全局快捷键 ----------
+	// 注意：RegisterHotKey(hWnd=0) 把热键绑到「调用线程」的消息队列，
+	// 所以注册和泵消息必须在同一个线程。Start() 内部先 LockOSThread 再注册。
 	var mgr *hotkeys.Manager
 	if !*noHot {
 		mgr = hotkeys.NewManager()
@@ -171,12 +179,23 @@ func main() {
 			server.FireHotkey(app, name)
 		}
 		if err := mgr.Bind(cfg.Hotkeys.Selection, cfg.Hotkeys.Screenshot, cfg.Hotkeys.Window, cfg.Hotkeys.Close, handler); err != nil {
+			logx.Warn("hotkey format invalid: %v", err)
+			fmt.Fprintf(os.Stderr, "快捷键配置无效：%v\n", err)
+			mgr = nil
+		} else if err := mgr.Start(); err != nil {
+			// 注册失败（被占用）时消息循环仍在跑，改设置里的键位即可热更新生效
 			logx.Warn("hotkeys unavailable: %v", err)
 			fmt.Fprintf(os.Stderr, "快捷键未生效：%v\n", err)
 		} else {
-			mgr.Start()
 			logx.Info("hotkeys registered")
 		}
+		// 设置页保存后热更新热键（原来只换 cfg 不重建，改了键位要重启才生效）
+		srv.SetHotkeyHook(func(h config.Hotkeys) error {
+			if mgr == nil {
+				return errors.New("全局快捷键已禁用（-no-hotkeys）")
+			}
+			return mgr.Rebind(h.Selection, h.Screenshot, h.Window, h.Close, handler)
+		})
 	}
 
 	// 无桌面窗口时退回浏览器（-web / -no-open 组合或 WebView2 缺失）

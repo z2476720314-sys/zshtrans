@@ -80,6 +80,24 @@ func (p *Provider) Fails() int {
 
 func now() float64 { return float64(time.Now().UnixNano()) / 1e9 }
 
+// directNeedKeys 直连提供方名 → 必需密钥（google/mymemory/lingva 无密钥要求）
+var directNeedKeys = map[string][]string{
+	"qwen-max":      {"qwen"},
+	"qwen-max-2606": {"qwen"},
+	"deepl":         {"deepl"},
+	"baidu":         {"baidu_appid", "baidu_key"},
+	"niutrans":      {"niutrans"},
+	"agnes":         {"agnes"},
+}
+
+// DirectNeedKeys 返回直连提供方所需密钥名；空切片表示无需密钥（对应 pyc need_keys）
+func DirectNeedKeys(name string) []string {
+	if keys, ok := directNeedKeys[name]; ok {
+		return keys
+	}
+	return nil
+}
+
 // BuildDirect 按 pyc TranslateEngine.__init__ 顺序与 need_keys 构建 9 个直连提供方
 func BuildDirect(k Keys) []*Provider {
 	rows := []*Provider{

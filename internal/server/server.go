@@ -5,10 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -22,14 +24,18 @@ import (
 
 // Server HTTP 服务（对应 pyc WebHandler + 重构后的完整 API）
 type Server struct {
-	app    *App
-	mux    *http.ServeMux
-	asset  fs.FS
-	onExit func() // 进程退出回调（自更新换版后重启用），由 main 注入
+	app      *App
+	mux      *http.ServeMux
+	asset    fs.FS
+	onExit   func()                     // 进程退出回调（自更新换版后重启用），由 main 注入
+	onHotkey func(config.Hotkeys) error // 热键热更新回调，由 main 注入
 }
 
 // SetExitHook 注入进程退出回调
 func (s *Server) SetExitHook(fn func()) { s.onExit = fn }
+
+// SetHotkeyHook 注入热键热更新回调（设置页保存后立刻生效，不必重启）
+func (s *Server) SetHotkeyHook(fn func(config.Hotkeys) error) { s.onHotkey = fn }
 
 // New 构建服务；asset 为前端构建产物（可为 nil）
 func New(app *App, asset fs.FS) *Server {
@@ -39,7 +45,43 @@ func New(app *App, asset fs.FS) *Server {
 }
 
 // Handler 暴露给 http.Server
-func (s *Server) Handler() http.Handler { return withCORS(withLog(s.mux)) }
+func (s *Server) Handler() http.Handler { return guardHost(withCORS(withLog(s.mux))) }
+
+// guardHost 挡住 DNS rebinding：只接受 Host 头是本机/私有 IP 字面量或 localhost 的请求。
+//
+// 默认监听 0.0.0.0（原版契约，局域网要用），但没有任何鉴权。攻击者若把自己的域名
+// 解析到 127.0.0.1，浏览器就会把它当同源去读 /api/config、POST /api/settings。
+// 拒绝一切「域名形态」的 Host 即可断掉这条路，普通用户不受影响。
+func guardHost(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		host = strings.Trim(host, "[]")
+		if host != "" && host != "localhost" {
+			if ip := net.ParseIP(host); ip == nil {
+				writeErr(w, http.StatusForbidden, "forbidden host")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// loopbackOnly 只允许本机发起的请求（管理类接口用，局域网页面只需 translate/status）
+func loopbackOnly(w http.ResponseWriter, r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil || !ip.IsLoopback() {
+		writeErr(w, http.StatusForbidden, "该接口只允许本机访问")
+		return false
+	}
+	return true
+}
 
 func (s *Server) routes() {
 	// 原 pyc 三个路由（保持兼容）
@@ -48,44 +90,84 @@ func (s *Server) routes() {
 
 	// 重构新增
 	s.mux.HandleFunc("/api/config", s.handleConfig)
-	s.mux.HandleFunc("/api/settings", s.handleSettings)
+	// 设置/更新/原生能力属于管理面，只允许本机访问：
+	// 默认监听 0.0.0.0 且无鉴权，否则同网段任何人（或恶意网页）都能改配置劫持密钥。
+	s.mux.HandleFunc("/api/settings", s.adminOnly(s.handleSettings))
 	s.mux.HandleFunc("/api/languages", s.handleLanguages)
 	s.mux.HandleFunc("/api/presets", s.handlePresets)
 	s.mux.HandleFunc("/api/providers", s.handleProviders)
-	s.mux.HandleFunc("/api/models", s.handleModels)
-	s.mux.HandleFunc("/api/test", s.handleTest)
-	s.mux.HandleFunc("/api/phrases", s.handlePhrases)
-	s.mux.HandleFunc("/api/ocr", s.handleOCR)
-	s.mux.HandleFunc("/api/selfcheck", s.handleSelfCheck)
+	s.mux.HandleFunc("/api/models", s.adminOnly(s.handleModels))
+	s.mux.HandleFunc("/api/test", s.adminOnly(s.handleTest))
+	s.mux.HandleFunc("/api/phrases", s.adminOnly(s.handlePhrases))
+	s.mux.HandleFunc("/api/ocr", s.adminOnly(s.handleOCR))
+	s.mux.HandleFunc("/api/selfcheck", s.adminOnly(s.handleSelfCheck))
 	s.mux.HandleFunc("/api/swap", s.handleSwap)
 	s.mux.HandleFunc("/api/lanip", s.handleLanIP)
 
 	// 自更新（检查 GitHub Release / 下载 / 换版重启）
-	s.mux.HandleFunc("/api/update/check", s.handleUpdateCheck)
-	s.mux.HandleFunc("/api/update/apply", s.handleUpdateApply)
+	s.mux.HandleFunc("/api/update/check", s.adminOnly(s.handleUpdateCheck))
+	s.mux.HandleFunc("/api/update/apply", s.adminOnly(s.handleUpdateApply))
 
 	// 原生能力：划词翻译 / 截图取词 / 热键事件流
-	s.mux.HandleFunc("/api/selection", s.handleSelection)
-	s.mux.HandleFunc("/api/capture", s.handleCapture)
+	s.mux.HandleFunc("/api/selection", s.adminOnly(s.handleSelection))
+	s.mux.HandleFunc("/api/capture", s.adminOnly(s.handleCapture))
 	s.mux.HandleFunc("/api/events", s.handleEvents)
 
 	// 静态资源与 SPA 兜底
 	s.mux.HandleFunc("/", s.handleStatic)
 }
 
+// adminOnly 包装管理类接口，非本机来源直接 403
+func (s *Server) adminOnly(fn http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !loopbackOnly(w, r) {
+			return
+		}
+		fn(w, r)
+	}
+}
+
 // ---------- 中间件 ----------
 
+// withCORS 只回显同源/本机来源的 Origin，不再无脑 `*`。
+//
+// 原来对任何响应都发 `Access-Control-Allow-Origin: *`，于是一个恶意网页
+// （甚至 DNS rebinding 后的页面）就能跨站读 /api/config（含 masked key 与
+// 全部 provider BaseURL）、POST /api/settings 把 BaseURL 改成自己的服务器劫持
+// 密钥和原文、甚至 POST /api/update/apply 换掉 exe。
+// 现在：非浏览器请求（无 Origin）照常；带 Origin 的只放行本机与私有网段。
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+		origin := r.Header.Get("Origin")
+		if origin != "" && allowedOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// allowedOrigin 判断 Origin 是否属于本机或私有局域网（http://127.0.0.1:8765 等）
+func allowedOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast())
 }
 
 // withLog 静默请求日志（对应 pyc log_message 不刷屏，写文件不写控制台）
@@ -111,10 +193,25 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
+// maxBody 请求体上限。translate/ocr 共用一个预算，但 OCR 的图片另有限制（见 handleOCR）。
+const maxBody = 24 << 20
+
 func readBody(r *http.Request, out any) error {
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 24<<20))
+	return readBodyLimit(r, out, maxBody)
+}
+
+// readBodyLimit 读 JSON 请求体；超限时报明确错误，而不是让 io.LimitReader
+// 静默截断后抛 JSON 解析失败（用户会看到莫名其妙的 unexpected end of JSON input）。
+func readBodyLimit(r *http.Request, out any, limit int64) error {
+	if r.ContentLength > limit {
+		return fmt.Errorf("请求体过大（%d 字节，上限 %d）", r.ContentLength, limit)
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
 	if err != nil {
 		return err
+	}
+	if int64(len(raw)) > limit {
+		return fmt.Errorf("请求体过大（上限 %d 字节）", limit)
 	}
 	if len(raw) == 0 {
 		return errors.New("empty body")
@@ -279,6 +376,9 @@ type settingsRequest struct {
 }
 
 // handleSettings POST /api/settings —— 校验 + 保存 + 热重载（对应 SettingsWindow.commit）
+//
+// 读-改-写整段放在 app.Mutate 里（applyMu 串行化）：原来无锁读 cfg、改完再整份写回，
+// 两个并发保存会把对方刚写的字段覆盖掉。
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if !method(w, r, http.MethodPost) {
 		return
@@ -288,76 +388,104 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	cfg := s.app.Config()
-	if req.SrcLang != "" {
-		cfg.SrcLang = req.SrcLang
-	}
-	if req.TgtLang != "" {
-		cfg.TgtLang = req.TgtLang
-	}
-	if cfg.SrcLang == cfg.TgtLang {
-		cfg.SrcLang = "auto"
-	}
-	if req.DefaultProvider != nil {
-		cfg.DefaultProvider = strings.TrimSpace(*req.DefaultProvider)
-	}
-	if req.OCRModel != nil {
-		cfg.OCRModel = strings.TrimSpace(*req.OCRModel)
-	}
-	if req.Hotkeys != nil {
-		cfg.Hotkeys = *req.Hotkeys
-	}
-	if req.Web != nil {
-		cfg.Web = *req.Web
-	}
-	if req.UpdateCheck != nil {
-		cfg.UpdateCheck = *req.UpdateCheck
-	}
-	if req.UpdateRepo != nil {
-		cfg.UpdateRepo = strings.TrimSpace(*req.UpdateRepo)
-	}
-	if req.UpdateSkipped != nil {
-		cfg.UpdateSkipped = strings.TrimSpace(*req.UpdateSkipped)
-	}
+
+	// 重复 ID 必须在归一化之前判定：NormalizeProviders 会去重，
+	// 若放到 validateSettings 里检查将永远不会触发（对应 pyc candidate() 的"提供方 ID 重复"）。
 	if req.Providers != nil {
-		// 重复 ID 必须在归一化之前判定：NormalizeProviders 会去重，
-		// 若放到 validateSettings 里检查将永远不会触发（对应 pyc candidate() 的"提供方 ID 重复"）。
 		if dup := duplicateProviderID(req.Providers); dup != "" {
 			writeErr(w, http.StatusBadRequest, "提供方 ID 重复："+dup)
 			return
 		}
-		cfg.Providers = providers.NormalizeProviders(req.Providers)
-	}
-	// 密钥：留空保留原值，占位字符串也保留原值
-	applyKeys := func(field *string, incoming string) {
-		v := strings.TrimSpace(incoming)
-		if v == "" || v == KeySaved || v == KeyMissing {
-			return
-		}
-		*field = v
-	}
-	if req.APIKeys != nil {
-		applyKeys(&cfg.APIKeys.DeepL, req.APIKeys["deepl"])
-		applyKeys(&cfg.APIKeys.BaiduAppID, req.APIKeys["baidu_appid"])
-		applyKeys(&cfg.APIKeys.BaiduKey, req.APIKeys["baidu_key"])
-		applyKeys(&cfg.APIKeys.NiuTrans, req.APIKeys["niutrans"])
-		applyKeys(&cfg.APIKeys.OCRSpace, req.APIKeys["ocrspace"])
-		applyKeys(&cfg.APIKeys.BaiduOCRAK, req.APIKeys["baidu_ocr_ak"])
-		applyKeys(&cfg.APIKeys.BaiduOCRsk, req.APIKeys["baidu_ocr_sk"])
-		applyKeys(&cfg.APIKeys.Agnes, req.APIKeys["agnes"])
-		applyKeys(&cfg.APIKeys.Qwen, req.APIKeys["qwen"])
-		applyKeys(&cfg.APIKeys.Acctoken, req.APIKeys["acctoken"])
 	}
 
-	if msg := validateSettings(cfg); msg != "" {
-		writeErr(w, http.StatusBadRequest, msg)
+	var saved config.Config
+	err := s.app.Mutate(func(c *config.Config) error {
+		if req.SrcLang != "" {
+			c.SrcLang = req.SrcLang
+		}
+		if req.TgtLang != "" {
+			c.TgtLang = req.TgtLang
+		}
+		if c.SrcLang == c.TgtLang {
+			c.SrcLang = "auto"
+		}
+		if req.DefaultProvider != nil {
+			c.DefaultProvider = strings.TrimSpace(*req.DefaultProvider)
+		}
+		if req.OCRModel != nil {
+			c.OCRModel = strings.TrimSpace(*req.OCRModel)
+		}
+		if req.Hotkeys != nil {
+			c.Hotkeys = *req.Hotkeys
+		}
+		if req.Web != nil {
+			c.Web = *req.Web
+		}
+		if req.UpdateCheck != nil {
+			c.UpdateCheck = *req.UpdateCheck
+		}
+		if req.UpdateRepo != nil {
+			c.UpdateRepo = strings.TrimSpace(*req.UpdateRepo)
+		}
+		if req.UpdateSkipped != nil {
+			c.UpdateSkipped = strings.TrimSpace(*req.UpdateSkipped)
+		}
+		if req.Providers != nil {
+			c.Providers = providers.NormalizeProviders(req.Providers)
+		}
+		// 密钥：留空或占位字符串保留原值
+		applyKeys := func(field *string, incoming string) {
+			v := strings.TrimSpace(incoming)
+			if v == "" || v == KeySaved || v == KeyMissing {
+				return
+			}
+			*field = v
+		}
+		if req.APIKeys != nil {
+			applyKeys(&c.APIKeys.DeepL, req.APIKeys["deepl"])
+			applyKeys(&c.APIKeys.BaiduAppID, req.APIKeys["baidu_appid"])
+			applyKeys(&c.APIKeys.BaiduKey, req.APIKeys["baidu_key"])
+			applyKeys(&c.APIKeys.NiuTrans, req.APIKeys["niutrans"])
+			applyKeys(&c.APIKeys.OCRSpace, req.APIKeys["ocrspace"])
+			applyKeys(&c.APIKeys.BaiduOCRAK, req.APIKeys["baidu_ocr_ak"])
+			applyKeys(&c.APIKeys.BaiduOCRsk, req.APIKeys["baidu_ocr_sk"])
+			applyKeys(&c.APIKeys.Agnes, req.APIKeys["agnes"])
+			applyKeys(&c.APIKeys.Qwen, req.APIKeys["qwen"])
+			applyKeys(&c.APIKeys.Acctoken, req.APIKeys["acctoken"])
+		}
+		if msg := validateSettings(*c); msg != "" {
+			return errors.New(msg)
+		}
+		saved = *c
+		return nil
+	})
+	if err != nil {
+		// 校验失败 → 400；写盘失败 → 500
+		code := http.StatusBadRequest
+		msg := err.Error()
+		if strings.HasPrefix(msg, "保存设置失败") {
+			code = http.StatusInternalServerError
+		}
+		writeErr(w, code, msg)
 		return
 	}
-	if err := s.app.Apply(cfg); err != nil {
-		writeErr(w, http.StatusInternalServerError, "保存设置失败："+err.Error())
-		return
+
+	// 热键热更新（改了键位不必重启）
+	if req.Hotkeys != nil && s.onHotkey != nil {
+		if hErr := s.onHotkey(saved.Hotkeys); hErr != nil {
+			logx.Warn("hotkey rebind fail: %v", hErr)
+			usable := len(providers.UsableProviders(saved.Providers, saved.APIKeys, envOrNil()))
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":           true,
+				"message":      "设置已保存，但热键未生效：" + hErr.Error(),
+				"usable":       usable,
+				"hotkey_error": hErr.Error(),
+			})
+			return
+		}
 	}
-	usable := len(providers.UsableProviders(cfg.Providers, cfg.APIKeys, envOrNil()))
+
+	usable := len(providers.UsableProviders(saved.Providers, saved.APIKeys, envOrNil()))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
 		"message": "设置已保存并生效（" + itoa(usable) + " 个模型可用）",
@@ -415,8 +543,18 @@ func engineUsable(cfg config.Config, name string, requireImage bool) bool {
 			return false // 直连提供方不支持图片输入
 		}
 		// providers.Labels 的键才是提供方名（值是中文显示名）
-		_, isDirect := providers.Labels[name]
-		return isDirect
+		if _, isDirect := providers.Labels[name]; !isDirect {
+			return false
+		}
+		// 直连提供方也要查密钥：Enabled() 缺密钥就把它过滤掉，
+		// 不查的话能存下「默认=qwen-max 但没配 qwen key」这种必然失败的配置。
+		keys := keysAdapter{keys: cfg.APIKeys}
+		for _, k := range providers.DirectNeedKeys(name) {
+			if !keys.Has(k) {
+				return false
+			}
+		}
+		return true
 	}
 	for _, p := range cfg.Providers {
 		if p.ID != providerID || !p.Enabled {
@@ -555,11 +693,19 @@ func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
 			if req.ModelID != "" && m.ID != req.ModelID {
 				continue
 			}
+			t0 := time.Now()
 			if err := providers.TestConnection(p, m, key); err != nil {
-				writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+				writeJSON(w, http.StatusOK, map[string]any{
+					"ok":    false,
+					"error": err.Error(),
+					"ms":    time.Since(t0).Milliseconds(),
+				})
 				return
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ms": 0})
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok": true,
+				"ms": time.Since(t0).Milliseconds(),
+			})
 			return
 		}
 	}
@@ -620,6 +766,9 @@ func (s *Server) handlePhrases(w http.ResponseWriter, r *http.Request) {
 
 // ---------- OCR ----------
 
+// maxOCRPixels 单次 OCR 允许的最大像素数（约 4000×4000）
+const maxOCRPixels = 16_000_000
+
 // ocrRequest POST /api/ocr —— 图片 base64 → 文字
 type ocrRequest struct {
 	Image string `json:"image"`
@@ -650,6 +799,13 @@ func (s *Server) handleOCR(w http.ResponseWriter, r *http.Request) {
 	img, err := ocr.Decode(raw)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "bad image: "+err.Error())
+		return
+	}
+	// 像素上限：一张 10000×10000 的 PNG 可以压到几百 KB，解码后却是 400MB RGBA，
+	// 后面还要再乘候选数（+Gray +Otsu），不拦住就是内存放大炸弹。
+	if wpx, hpx := img.Bounds().Dx(), img.Bounds().Dy(); wpx*hpx > maxOCRPixels {
+		writeErr(w, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("图片过大（%d×%d，上限 %d 万像素）", wpx, hpx, maxOCRPixels/10000))
 		return
 	}
 	cfg := s.app.Config()

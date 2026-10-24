@@ -111,6 +111,49 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	rel, path := upd.rel, upd.path
 	upd.mu.Unlock()
 
+	// 需要下载的动作先原子占位再走网络：原来「查 busy → 释放锁 → 请求网络 →
+	// 置 busy」中间有窗口，并发两次点击会各下一份、互相覆盖进度。
+	wantDownload := req.Action == "download" || (req.Action == "" || req.Action == "install") && path == ""
+	if wantDownload {
+		upd.mu.Lock()
+		if upd.busy {
+			upd.mu.Unlock()
+			writeErr(w, http.StatusConflict, "已有更新任务在进行")
+			return
+		}
+		upd.busy = true
+		upd.done, upd.total, upd.lastErr = 0, 0, ""
+		upd.mu.Unlock()
+		release := func() {
+			upd.mu.Lock()
+			upd.busy = false
+			upd.mu.Unlock()
+		}
+		// 下面任何提前 return 都要释放占位
+		fail := func(code int, msg string) {
+			release()
+			writeErr(w, code, msg)
+		}
+		if rel == nil {
+			got, err := update.CheckRepo(repo, config.AppVersion)
+			if err != nil {
+				fail(http.StatusBadGateway, err.Error())
+				return
+			}
+			if got == nil {
+				fail(http.StatusBadRequest, "已是最新版本")
+				return
+			}
+			rel = got
+			upd.mu.Lock()
+			upd.rel = got
+			upd.mu.Unlock()
+		}
+		go downloadAsync(rel)
+		writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "state": "downloading"})
+		return
+	}
+
 	// 没有缓存版本信息就先查一次
 	if rel == nil {
 		got, err := update.CheckRepo(repo, config.AppVersion)
@@ -130,16 +173,6 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Action {
 	case "", "install":
-		// install：确保已下载
-		if path == "" {
-			upd.mu.Lock()
-			upd.busy = true
-			upd.done, upd.total, upd.lastErr = 0, 0, ""
-			upd.mu.Unlock()
-			go downloadAsync(rel)
-			writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "state": "downloading"})
-			return
-		}
 		if _, err := os.Stat(path); err != nil {
 			writeErr(w, http.StatusBadRequest, "安装包已失效，请重新下载")
 			return
@@ -160,12 +193,8 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		}()
 		return
 	case "download":
-		upd.mu.Lock()
-		upd.busy = true
-		upd.done, upd.total, upd.lastErr = 0, 0, ""
-		upd.mu.Unlock()
-		go downloadAsync(rel)
-		writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "state": "downloading"})
+		// 已在上面统一处理（含原子占位），走不到这里
+		writeErr(w, http.StatusInternalServerError, "unreachable")
 		return
 	case "status":
 		upd.mu.Lock()

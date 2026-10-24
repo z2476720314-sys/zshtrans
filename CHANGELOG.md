@@ -1,5 +1,54 @@
 # 更新记录
 
+## v3.1 — 2026-10-25
+
+代码审查（独立只读评审 7091 行 / 19 包）发现的 20 条缺陷全部修复，并补齐单元测试。
+本轮无新增功能，只做正确性与安全性加固。
+
+### 修复 · 高危
+- **全局热键全部失效**：`RegisterHotKey(hWnd=0)` 把热键绑到调用线程的消息队列，但注册在主 goroutine、
+  泵消息在另一个加了 `LockOSThread` 的 goroutine，主 goroutine 随即进入 WebView2 消息循环并把
+  `hwnd=NULL` 的 `WM_HOTKEY` 丢弃。重写为「注册与泵消息都在同一个锁定的 OS 线程」，并支持改设置时
+  热更新注册（新增 `Rebind`）。
+- **更新包不校验完整性**：原来从不比较 `done == total`，也不校验文件头，`Content-Length` 缺失或提前
+  EOF 时截断的 exe 会被装上并重启且无法回滚。现在校验长度、非空、MZ/PE 签名；更新脚本先备份旧 exe，
+  `copy` 失败走 `:rollback` 分支还原。
+- **默认监听 `0.0.0.0` + 零鉴权 + `Access-Control-Allow-Origin: *`**：任意局域网主机或恶意网页可读走
+  全部密钥、改写提供方地址、触发更新。现在：Host 头必须是 IP 或 `localhost`（防 DNS rebinding）；
+  写操作类接口（设置 / 模型 / 测试 / 常用语 / OCR / 自检 / 更新 / 划词 / 截图）只允许回环来源；
+  CORS 只回显本机与私网来源，不再发 `*`。
+
+### 修复 · 中危
+- 更新下载的 `busy` 标志改为先原子置位再发起网络请求，消除并发重复下载；失败路径统一释放占位。
+- `/api/settings` 的读-改-写改为在 `App.Mutate` 里串行执行，并发保存不再互相覆盖；热键保存失败时
+  返回 200 并带 `hotkey_error`，不再静默失败。
+- `engineUsable` 判定直连引擎时会校验必需密钥，不再允许保存「默认引擎缺密钥」的必然失败配置。
+- `/api/ocr` 加 1600 万像素上限，挡住 PNG 解压炸弹（10000×10000 解码即 400MB RGBA）。
+- `readBody` 不再静默截断：`Content-Length` 超限在读之前就拒绝，读后再复查实际长度。
+- 百度 OCR 的 access_token 加双重互斥锁（原为包级变量并发读写，存在 data race）。
+- OCR 缓存键改用实际胜出的候选图哈希，不再恒用原图，避免缓存污染导致下次跳过更优候选。
+- 坏配置文件改名为 `.bad` 留档后再回落默认值，不再在用户下次保存时用空配置覆盖掉密钥。
+- 删除「`ocrspace` 为空时回填 `helloworld`」的逻辑，用户主动清空后不再被复活。
+- 配置目录改为「exe 目录可写就用，否则用 `%APPDATA%\ZSH TRANS`」，装到 `C:\Program Files` 后保存
+  不再静默失败。
+- 划词取词真正还原用户原剪贴板（原实现只把原内容用于判空，从不写回，每划一次词就永久覆盖剪贴板）。
+- 更新脚本名带 PID、按 PID 杀进程（不再 `taskkill /im` 误杀同名实例）。
+
+### 修复 · 低危
+- `Store.Get` 返回深拷贝，调用方修改不再污染内部状态。
+- `keyByRef` 的 `key_ref` 与密钥值都做 `TrimSpace`。
+- `/api/test` 返回真实耗时（原恒为 0）；OCR 失败信息里的放大倍数不再恒为 `1.0`。
+- 桌面窗口子类化失败时撤销占位允许重试，不再让窗口永久关不掉。
+- HTTP 服务补 `ReadTimeout`/`IdleTimeout`；`-console` 现在真的会同时输出到 stderr。
+
+### 新增 · 单元测试
+45 个测试，覆盖 `config` / `engine` / `hotkeys` / `lang` / `ocr` / `server` / `update` 七个包
+（此前 19 个包里只有 `server` 有两个测试）。测试顺带抓出一个真实缺陷：引擎的「健康优先」排序原来
+只会把不健康的节点往右推一格，无法把排在队首的不健康节点挪到后面，与 `order.sort(key=not healthy)`
+不等价，已改为 `sort.SliceStable`。
+
+---
+
 ## v3.0 — 2026-10-24
 
 首个 Go 重构版。原版是 Python 3.14 + PyQt5 的 `translate.py` + `translate_tool_core.pyc`（v2.38）。

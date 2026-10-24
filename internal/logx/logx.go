@@ -9,9 +9,10 @@ import (
 )
 
 var (
-	mu   sync.Mutex
-	file *os.File
-	path string
+	mu        sync.Mutex
+	file      *os.File
+	path      string
+	consoleOn bool
 )
 
 // Init 打开日志文件（追加模式）；失败时退化为仅控制台
@@ -47,6 +48,9 @@ func Close() {
 }
 
 // Write 写一行日志（同时输出到 stderr）
+//
+// stderr 输出真的做了：`-console` 附加控制台后，用户就是靠它看运行情况的；
+// 原来注释这么写但从不写 stderr，挂控制台只能看到一片空白。
 func Write(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	line := time.Now().Format("2006-01-02 15:04:05") + " " + msg + "\n"
@@ -54,6 +58,17 @@ func Write(format string, args ...any) {
 	if file != nil {
 		_, _ = file.WriteString(line)
 	}
+	console := consoleOn
+	mu.Unlock()
+	if console {
+		_, _ = os.Stderr.WriteString(line)
+	}
+}
+
+// EnableConsole 打开 stderr 输出（main 在附加控制台成功后调用）
+func EnableConsole() {
+	mu.Lock()
+	consoleOn = true
 	mu.Unlock()
 }
 

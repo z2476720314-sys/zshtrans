@@ -68,6 +68,7 @@ func Run(img image.Image, keys Keys) (Result, error) {
 
 	type outcome struct {
 		name string
+		cand string
 		text string
 		err  error
 	}
@@ -125,7 +126,7 @@ func Run(img image.Image, keys Keys) (Result, error) {
 					errs = append(errs, fmt.Sprintf("%s [%s]: no text recognized", eng.name, cand.Name))
 					return
 				}
-				collected = append(collected, outcome{name: eng.name, text: text})
+				collected = append(collected, outcome{name: eng.name, cand: cand.Name, text: text})
 			}()
 		}
 	}
@@ -143,8 +144,15 @@ func Run(img image.Image, keys Keys) (Result, error) {
 			detail = "no engine produced text"
 		}
 		bg := Otsu(Gray(img))
+		// x 是候选里最大的放大倍数（原版写死 1.0，多候选时看不出放大了几倍）
+		scale := 1.0
+		for _, c := range cands {
+			if c.Scale > scale {
+				scale = c.Scale
+			}
+		}
 		return Result{}, fmt.Errorf("all OCR failed (img %dx%d, %d cands, bg=%d, x%.1f):\n%s",
-			img.Bounds().Dx(), img.Bounds().Dy(), len(cands), bg, 1.0, detail)
+			img.Bounds().Dx(), img.Bounds().Dy(), len(cands), bg, scale, detail)
 	}
 
 	// 中位数长度择优（对应 pyc _ocr_median）
@@ -152,7 +160,16 @@ func Run(img image.Image, keys Keys) (Result, error) {
 		return len([]rune(collected[i].text)) < len([]rune(collected[j].text))
 	})
 	best := collected[len(collected)/2]
-	ocrCache.put("raw:"+hashKey(B64(cands[0].PNG)), best.text)
+	// 缓存键必须跟着「产出 best 的那个候选图」走。原来恒用 cands[0]，
+	// 若 best 来自 binary/scaled 候选，下次会拿原图的键命中错误结果、并跳过更优候选。
+	keyCand := cands[0]
+	for _, c := range cands {
+		if c.Name == best.cand {
+			keyCand = c
+			break
+		}
+	}
+	ocrCache.put("raw:"+hashKey(B64(keyCand.PNG)), best.text)
 	return Result{Text: best.text, Engine: best.name}, nil
 }
 

@@ -60,6 +60,9 @@ type App struct {
 	eng   *engine.Engine
 	bus   *bus
 	win   Windower
+	// applyMu 串行化「读配置 → 改 → 落盘 → 重建引擎」整段。
+	// 原来 /api/settings 全程无锁读-改-写，两个并发保存会互相覆盖对方的字段。
+	applyMu sync.Mutex
 }
 
 // setWindower 注入桌面窗口控制（main 在 WebView2 就绪后调用）
@@ -131,6 +134,24 @@ func (a *App) rebuild() {
 
 // Apply 保存配置 → 落盘 → 重建引擎（对应 commit）
 func (a *App) Apply(cfg config.Config) error {
+	a.applyMu.Lock()
+	defer a.applyMu.Unlock()
+	return a.applyLocked(cfg)
+}
+
+// Mutate 在锁内完成「读当前配置 → 由 fn 修改 → 校验 → 落盘 → 重建引擎」。
+// fn 返回错误时什么都不写，调用方拿到原始错误（用于把校验失败转成 400）。
+func (a *App) Mutate(fn func(cfg *config.Config) error) error {
+	a.applyMu.Lock()
+	defer a.applyMu.Unlock()
+	cfg := a.store.Get()
+	if err := fn(&cfg); err != nil {
+		return err
+	}
+	return a.applyLocked(cfg)
+}
+
+func (a *App) applyLocked(cfg config.Config) error {
 	if err := config.Save(cfg); err != nil {
 		return err
 	}
