@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -38,6 +39,8 @@ type Release struct {
 	Body        string  `json:"body"`
 	HTMLURL     string  `json:"html_url"`
 	PublishedAt string  `json:"published_at"`
+	Draft       bool    `json:"draft"`
+	Prerelease  bool    `json:"prerelease"`
 	Assets      []Asset `json:"assets"`
 	// 计算字段
 	Version string `json:"version"` // 去掉前缀 v 的版本号
@@ -58,15 +61,33 @@ var ErrNoRelease = errors.New("仓库暂无发布版本")
 // client 独立超时（更新检查不该被翻译的 8s 超时绑住）
 var client = &http.Client{Timeout: 20 * time.Second}
 
+// downloadClient 下载专用：整个响应体的传输可能几十秒，不能沿用 20s 总超时
+// （实测 10MB 包在国内网络 20s 只到 1.2MB 就 Client.Timeout 中断）。
+// 这里只限制连接与首字节，传输阶段靠调用方的 context 与 progress 收尾。
+var downloadClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 20 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   20 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConnsPerHost:   4,
+	},
+}
+
 // Check 拉取 latest release 并与当前版本比较。返回 nil 表示已是最新。
 func Check(current string) (*Release, error) { return CheckRepo(Repo, current) }
 
-// CheckRepo 指定仓库检查更新
+// CheckRepo 指定仓库检查更新。
+//
+// 不用 /releases/latest：GitHub 在该接口上按 created_at 取「最新」，同一天连发两个
+// release 时排序不稳定，可能返回较旧的那个（实测 v3.2 建好后 latest 仍指向 v3.1）。
+// 改为拉 release 列表，自己按版本号取最大，并跳过 draft / prerelease。
 func CheckRepo(repo, current string) (*Release, error) {
 	if strings.TrimSpace(repo) == "" {
 		repo = Repo
 	}
-	url := "https://api.github.com/repos/" + repo + "/releases/latest"
+	url := "https://api.github.com/repos/" + repo + "/releases?per_page=30"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -87,24 +108,52 @@ func CheckRepo(repo, current string) (*Release, error) {
 		return nil, fmt.Errorf("检查更新失败：HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 
-	var rel Release
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&rel); err != nil {
+	var list []Release
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&list); err != nil {
 		return nil, fmt.Errorf("解析发布信息失败：%w", err)
 	}
-	rel.Version = TrimVersion(rel.Tag)
-	for _, a := range rel.Assets {
+	if len(list) == 0 {
+		return nil, ErrNoRelease
+	}
+
+	// 挑出正式发布里版本号最大的那个
+	best := pickLatest(list)
+	if best == nil {
+		return nil, ErrNoRelease
+	}
+
+	for _, a := range best.Assets {
 		if strings.EqualFold(a.Name, AssetName) {
-			rel.URL, rel.Size = a.DownloadURL, a.Size
+			best.URL, best.Size = a.DownloadURL, a.Size
 			break
 		}
 	}
-	if rel.URL == "" {
-		return nil, fmt.Errorf("发布 %s 未附带 %s", rel.Tag, AssetName)
+	if best.URL == "" {
+		return nil, fmt.Errorf("发布 %s 未附带 %s", best.Tag, AssetName)
 	}
-	if CompareVersions(rel.Version, TrimVersion(current)) <= 0 {
+	if CompareVersions(best.Version, TrimVersion(current)) <= 0 {
 		return nil, nil
 	}
-	return &rel, nil
+	return best, nil
+}
+
+// pickLatest 从发布列表里挑版本号最大的正式版（跳过 draft / prerelease）。
+// 抽成独立函数是为了能单测：GitHub 的 /releases/latest 排序不可靠，这段逻辑是
+// 「检查更新」正确性的核心，必须被测试锁住。
+func pickLatest(list []Release) *Release {
+	var best *Release
+	for i := range list {
+		rel := list[i]
+		if rel.Draft || rel.Prerelease {
+			continue
+		}
+		rel.Version = TrimVersion(rel.Tag)
+		if best == nil || CompareVersions(rel.Version, best.Version) > 0 {
+			cp := rel
+			best = &cp
+		}
+	}
+	return best
 }
 
 // TrimVersion 去掉 v/V 前缀与首尾空白
@@ -143,7 +192,12 @@ func CompareVersions(a, b string) int {
 	return 0
 }
 
-// Download 下载新版本到 dest（带进度回调，可为 nil）
+// Download 下载新版本到 dest（带进度回调，可为 nil）。
+//
+// 到 github.com / release-assets.githubusercontent.com 的连接在国内网络经常
+// 握手超时或传输中途 wsarecv 断流（实测同一 URL 三次里两次失败），而更新是
+// 一次性、不可交互的操作，失败后用户只能手动点重试。所以这里做有限次重试，
+// 每次从 0 重新下载（不支持 Range 续传的镜像很多，续传反而更容易写坏文件）。
 func Download(url, dest string, progress func(done, total int64)) error {
 	if url == "" {
 		return errors.New("下载地址为空")
@@ -151,18 +205,39 @@ func Download(url, dest string, progress func(done, total int64)) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
+	const attempts = 3
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			// 指数退避，给不稳定的出口一点恢复时间
+			time.Sleep(time.Duration(i) * 2 * time.Second)
+			if progress != nil {
+				progress(0, 0) // 重置进度显示
+			}
+		}
+		err := downloadOnce(url, dest, progress)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+	}
+	return fmt.Errorf("下载失败（已重试 %d 次）：%w", attempts, lastErr)
+}
+
+// downloadOnce 单次下载：写 .part → 校验长度/非空/PE 头 → 改名
+func downloadOnce(url, dest string, progress func(done, total int64)) error {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("User-Agent", "zshtrans-updater")
-	resp, err := client.Do(req)
+	resp, err := downloadClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("下载失败：%w", err)
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载失败：HTTP %d", resp.StatusCode)
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	tmp := dest + ".part"
 	f, err := os.Create(tmp)

@@ -100,3 +100,42 @@ func TestCheckPEFixture(t *testing.T) {
 		t.Error("truncated file should be rejected")
 	}
 }
+
+// TestPickLatest 发布列表按版本号取最大，跳过 draft / prerelease。
+// 这条对应真实缺陷：GitHub 的 /releases/latest 按 created_at 排序，同一天连发
+// 两个 release 时会返回较旧的那个（实测 v3.2 建好后 latest 仍指向 v3.1），
+// 导致「检查更新」永远说已是最新。改用列表 + 版本号比较。
+func TestPickLatest(t *testing.T) {
+	list := []Release{
+		{Tag: "v3.1", Draft: false, Prerelease: false},
+		{Tag: "v3.2", Draft: false, Prerelease: false},
+		{Tag: "v9.9", Draft: true, Prerelease: false},   // draft 必须跳过
+		{Tag: "v8.0", Draft: false, Prerelease: true},   // prerelease 必须跳过
+		{Tag: "v3.10", Draft: false, Prerelease: false}, // 数字比较，不能按字符串
+	}
+	best := pickLatest(list)
+	if best == nil {
+		t.Fatal("pickLatest returned nil")
+	}
+	if best.Tag != "v3.10" {
+		t.Errorf("pickLatest = %q, want v3.10", best.Tag)
+	}
+
+	// 全是 draft/prerelease → nil
+	if got := pickLatest([]Release{{Tag: "v1.0", Draft: true}}); got != nil {
+		t.Errorf("all-draft list should return nil, got %q", got.Tag)
+	}
+	// 空列表 → nil
+	if got := pickLatest(nil); got != nil {
+		t.Errorf("empty list should return nil, got %q", got.Tag)
+	}
+}
+
+// TestReleaseVersionComputed 列表项算出的 Version 已去掉 v 前缀
+func TestReleaseVersionComputed(t *testing.T) {
+	list := []Release{{Tag: "v3.2"}}
+	best := pickLatest(list)
+	if best == nil || best.Version != "3.2" {
+		t.Fatalf("best.Version = %q, want 3.2", best.Version)
+	}
+}

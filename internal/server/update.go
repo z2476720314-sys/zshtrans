@@ -102,6 +102,22 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		repo = update.Repo
 	}
 
+	// status 是只读轮询，必须能在下载进行中调用；否则前端 700ms 轮询每次都被 409
+	// 挡掉，进度条不动、下载完也不会自动 install。
+	if req.Action == "status" {
+		upd.mu.Lock()
+		defer upd.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":    true,
+			"busy":  upd.busy,
+			"done":  upd.done,
+			"total": upd.total,
+			"ready": upd.path != "",
+			"error": upd.lastErr,
+		})
+		return
+	}
+
 	upd.mu.Lock()
 	if upd.busy {
 		upd.mu.Unlock()
@@ -197,16 +213,8 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "unreachable")
 		return
 	case "status":
-		upd.mu.Lock()
-		defer upd.mu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":    true,
-			"busy":  upd.busy,
-			"done":  upd.done,
-			"total": upd.total,
-			"ready": upd.path != "",
-			"error": upd.lastErr,
-		})
+		// 已在函数开头统一处理（下载进行中也要能读进度）
+		writeErr(w, http.StatusInternalServerError, "unreachable")
 		return
 	}
 	writeErr(w, http.StatusBadRequest, "未知动作")

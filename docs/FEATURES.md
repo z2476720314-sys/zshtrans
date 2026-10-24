@@ -257,3 +257,35 @@ token 的 data race、OCR 缓存键、坏配置留档、`ocrspace` 默认值不�
 45 个测试覆盖 `config` / `engine` / `hotkeys` / `lang` / `ocr` / `server` / `update`。
 其中 `server` 的 `guard_test.go` 是 16.3 的回归测试，`update_test.go` 的 `checkPE` 用合成字节
 而非真 exe，`ocr/image_test.go` 断言 Otsu 的**分隔效果**而非阈值数值（纯双峰图像的最优阈值本来就是 0）。
+
+## 17. v3.2 自动更新联调修复
+
+这三条是「真的去 GitHub 拉一次新版本」时才暴露的问题，静态审查与本地单测都发现不了。
+记录在此，同时说明自动更新链路现在的实际行为。
+
+### 17.1 版本发现（`internal/update/update.go` `CheckRepo` / `pickLatest`）
+原实现用 `GET /repos/{repo}/releases/latest`。该接口按 `created_at` 决定「最新」，
+同一天连发两个 release 时排序不稳定——实测 v3.2 的 release 建好后，`latest` 仍返回 v3.1，
+于是 v3.1 用户永远看到「已是最新版本」。
+现在改为 `GET /repos/{repo}/releases?per_page=30`，由 `pickLatest` 跳过 `draft` /
+`prerelease`、按 `CompareVersions` 取版本号最大者。`pickLatest` 单独抽出并被
+`TestPickLatest` / `TestReleaseVersionComputed` 锁住（含 v3.10 > v3.9 的数字比较）。
+
+### 17.2 下载超时与重试（`Download` / `downloadOnce` / `downloadClient`）
+原实现复用检查更新的 `client`（20s 总超时），实测国内网络 10MB 包只下到 1.2MB 就
+`Client.Timeout`。现在下载用独立 `downloadClient`：只限制拨号 20s、TLS 握手 20s、
+响应头 30s，**不限制响应体传输总时长**；并对连接失败/中途断流做 3 次带指数退避的重试
+（每次从 0 重下——很多镜像不支持 Range，续传更容易写坏文件）。
+完整性仍是三道：`done == total`、非空、MZ/PE 签名。
+
+### 17.3 进度轮询（`internal/server/update.go` `handleUpdateApply`）
+`busy` 检查原来在函数最前面，前端每 700ms 轮询 `{action:"status"}` 全部收到 409，
+表现是进度条不动、下载完成后也不自动安装。现在 `status` 在取 `busy` 之前优先处理，
+任何时刻都能读进度。
+
+### 17.4 端到端验证记录
+- 建临时 release `v3.2` → `GET /api/update/check` 返回 `{current:v3.1, latest:3.2, has_new:true, size:10269696}`。
+- `POST {action:"download"}` → 进度从 0 涨到 10269696（约 6 分钟，网络抖动下未中断）。
+- `POST {action:"install"}` → 进程退出、批处理换 exe、自动重启，新进程日志显示
+  `ZSH TRANS v3.2 starting` 与 `desktop window created`。
+- 验证完删除临时 release，仓库只留 `v3.1` 正式版。

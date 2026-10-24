@@ -2,13 +2,13 @@
   "FixedFileInfo": {
     "FileVersion": {
       "Major": 3,
-      "Minor": 1,
+      "Minor": 2,
       "Patch": 0,
       "Build": 0
     },
     "ProductVersion": {
       "Major": 3,
-      "Minor": 1,
+      "Minor": 2,
       "Patch": 0,
       "Build": 0
     },
@@ -22,12 +22,12 @@
     "Comments": "跨境翻译台 - 俄英中互译",
     "CompanyName": "ZSH",
     "FileDescription": "ZSH TRANS 跨境翻译台",
-    "FileVersion": "3.1.0.0",
+    "FileVersion": "3.2.0.0",
     "InternalName": "zshtrans",
     "LegalCopyright": "Copyright (C) 2026 ZSH",
     "OriginalFilename": "zshtrans.exe",
     "ProductName": "ZSH TRANS",
-    "ProductVersion": "3.1.0.0"
+    "ProductVersion": "3.2.0.0"
   },
   "VarFileInfo": {
     "Translation": {

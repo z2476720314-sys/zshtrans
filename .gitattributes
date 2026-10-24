@@ -1,0 +1,17 @@
+# 统一换行：源码入库一律 LF。
+# 之前 core.autocrlf=true 让检出时变 CRLF，导致 gofmt -l 永远把这些文件报成未格式化
+# （gofmt 输出 LF，两边对不上）。这里显式钉死，避免再被本地 git 配置影响。
+* text=auto eol=lf
+
+# Windows 批处理必须 CRLF，否则 cmd 解析会出错
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制
+*.exe binary
+*.ico binary
+*.png binary
+*.jpg binary
+*.syso binary
+*.woff binary
+*.woff2 binary
