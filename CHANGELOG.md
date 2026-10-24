@@ -1,5 +1,30 @@
 # 更新记录
 
+## v3.3 — 2026-10-25
+
+v3.2 把自动更新的三处逻辑修好了，但真在国内网络点「立即更新」还是失败——下载地址
+用的是 `github.com`，而本机到 `github.com:443` 完全不通（`curl` 8 秒超时无响应）。
+只有 `api.github.com` 与 `release-assets.githubusercontent.com` 可达。
+
+### 修复
+- **下载源不可达**：`Release` 增加 `URLs []string`，首选 `api.github.com` 的资源端点
+  （`assets[].url`），失败再退回 `browser_download_url`。新增 `DownloadAny` 依次尝试
+  多个源，全部失败时按主机名列出每个源的原因，能分清是「源不通」还是「文件坏了」。
+- **资源端点缺 Accept 头**：`api.github.com` 的 asset 端点不带
+  `Accept: application/octet-stream` 只返回 JSON 元数据（被 PE 校验挡下），现在统一带上。
+
+### 验证
+`Check("v3.1")` 检出 v3.2 且两个源顺序正确；`Check("v3.2")` 判已最新；
+`DownloadAny` 下满 10273280 字节、PE magic `MZ`、进度收尾等于总长。
+
+### 打包
+exe 资源改用 `go-winres` 单一路径：`winres/winres.json` 同时产出图标、manifest 与
+`RT_VERSION`（FileVersion/ProductVersion 3.3.0.0、CompanyName ZSH、ProductName ZSH TRANS），
+不再需要 `akavel/rsrc` + `versioninfo.json` 两套。`rsrc.manifest` 补回
+`Microsoft.Windows.Common-Controls` 依赖与 `requestedExecutionLevel`。
+
+---
+
 ## v3.2 — 2026-10-25
 
 联调自动更新时发现的三处真实缺陷。三条都只在「真的去 GitHub 拉一次新版本」时才会暴露，

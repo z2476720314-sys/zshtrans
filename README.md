@@ -1,4 +1,4 @@
-# ZSH TRANS v3.2 · 跨境翻译台
+# ZSH TRANS v3.3 · 跨境翻译台
 
 俄 ↔ 中 ↔ 英跨境客服翻译工具。Go 后端 + React/Ant Design 前端，单文件 exe，无需安装 Python/Qt/运行库。
 
@@ -214,12 +214,13 @@ npm install          # 或 pnpm install
 npx tsc --noEmit
 npx vite build       # 产物输出到 ../internal/web/dist
 
-# 2. 资源（图标 + manifest -> .syso，由 go build 自动链接）
-go install github.com/akavel/rsrc@latest
-rsrc -manifest rsrc.manifest -ico assets/app.ico -o cmd/zshtrans/rsrc_windows_amd64.syso
-# 版本信息（FileVersion/ProductName 等）由 versioninfo.json 提供，发布前用
-#   go-winres simply --in versioninfo.json --arch amd64 --out cmd/zshtrans/rsrc
-# 不需要版本信息可省略这一步，只留图标 + manifest 也能正常跑。
+# 2. 资源（图标 + manifest + 版本信息 -> .syso，由 go build 自动链接）
+go install github.com/tc-hib/go-winres@latest
+go-winres make --in winres/winres.json --arch amd64 --out cmd/zshtrans/rsrc
+# winres/winres.json 引用 ../assets/app.ico 与 ../rsrc.manifest，
+# 同时写入 RT_VERSION（FileVersion / ProductName / CompanyName 等）。
+# 只想快速出图省掉版本信息，可用 akavel/rsrc：
+#   rsrc -manifest rsrc.manifest -ico assets/app.ico -o cmd/zshtrans/rsrc_windows_amd64.syso
 
 # 3. 后端
 go build -buildvcs=false -ldflags "-s -w" -o zshtrans.exe ./cmd/zshtrans
@@ -259,7 +260,7 @@ zshtrans/
 ├── frontend/              # React 19 + TypeScript + Vite + Ant Design
 ├── assets/app.ico         # 程序图标
 ├── rsrc.manifest          # DPI / longPath / supportedOS 清单
-├── versioninfo.json       # 版本信息资源
+├── winres/winres.json     # 图标 + manifest + 版本信息 → .syso 的资源清单
 ├── docs/FEATURES.md       # 原版功能逐条对照表（验收基线）
 ├── tools/promptdump/      # 提示词导出小工具
 └── dist/                  # 发布产物

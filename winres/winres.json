@@ -1,0 +1,38 @@
+{
+  "RT_GROUP_ICON": {
+    "#1": {
+      "0409": "../assets/app.ico"
+    }
+  },
+  "RT_MANIFEST": {
+    "#1": {
+      "0409": "../rsrc.manifest"
+    }
+  },
+  "RT_VERSION": {
+    "#1": {
+      "0409": {
+        "fixed": {
+          "file_version": "3.3.0.0",
+          "product_version": "3.3.0.0"
+        },
+        "info": {
+          "0409": {
+            "Comments": "跨境翻译台 - 俄英中互译",
+            "CompanyName": "ZSH",
+            "FileDescription": "ZSH TRANS 跨境翻译台",
+            "FileVersion": "3.3.0.0",
+            "InternalName": "zshtrans",
+            "LegalCopyright": "Copyright (C) 2026 ZSH",
+            "LegalTrademarks": "",
+            "OriginalFilename": "zshtrans.exe",
+            "PrivateBuild": "",
+            "ProductName": "ZSH TRANS",
+            "ProductVersion": "3.3.0.0",
+            "SpecialBuild": ""
+          }
+        }
+      }
+    }
+  }
+}

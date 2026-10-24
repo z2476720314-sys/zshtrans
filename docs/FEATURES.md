@@ -289,3 +289,27 @@ token 的 data race、OCR 缓存键、坏配置留档、`ocrspace` 默认值不�
 - `POST {action:"install"}` → 进程退出、批处理换 exe、自动重启，新进程日志显示
   `ZSH TRANS v3.2 starting` 与 `desktop window created`。
 - 验证完删除临时 release，仓库只留 `v3.1` 正式版。
+
+## 18. v3.3 下载源可达性修复
+
+v3.2 把更新链路的三处逻辑修好了，但真正在国内网络点「立即更新」仍然失败：
+`Download` 用的是 release 的 `browser_download_url`（`github.com/...`），而本机到
+`github.com:443` 完全不通（`curl` 8 秒超时无响应），只有 `api.github.com` 与
+`release-assets.githubusercontent.com` 可达。表现为 `net/http: timeout awaiting response headers`。
+
+### 18.1 双源下载（`internal/update/update.go` `DownloadAny`）
+`Release` 增加 `URLs []string`：第一个是 `assets[].url`（`api.github.com/repos/.../releases/assets/{id}`），
+第二个是 `browser_download_url`。`DownloadAny` 依次尝试，任一成功即返回；全部失败时把
+每个源的失败原因按主机名列出（`api.github.com: ...` / `github.com: ...`），用户能看出是源不通
+还是文件有问题。`Download(url, ...)` 保留为单源包装，向后兼容。
+
+### 18.2 资源端点需要 `Accept: application/octet-stream`
+`api.github.com` 的 asset 端点不带这个头会返回一小段 JSON 元数据（被 PE 校验挡下），
+带上才 302 到真实文件。`downloadOnce` 现在统一加该头；对 `browser_download_url` 无副作用。
+
+### 18.3 端到端验证记录
+- `update.Check("v3.1")` → `tag=v3.2 size=10273280`，`urls` 两个源顺序正确。
+- `update.Check("v3.2")` → `nil`（同版本判已最新）。
+- `update.DownloadAny(rel.URLs, ...)` → 10273280 字节，PE magic `MZ`，进度回调收尾等于总长。
+- 对照：直接 `curl` `github.com` 侧 URL 8s 超时；`curl -H "Accept: application/octet-stream"` 走
+  `api.github.com` 端点 2.0s 下完 10273280 字节。

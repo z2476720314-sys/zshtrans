@@ -222,7 +222,8 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 
 func downloadAsync(rel *update.Release) {
 	path := update.TempPath(rel.Version)
-	err := update.Download(rel.URL, path, func(done, total int64) {
+	// 优先 api.github.com 的资源端点（国内可达），失败再退回 github.com 直链
+	err := update.DownloadAny(rel.URLs, path, func(done, total int64) {
 		upd.mu.Lock()
 		upd.done, upd.total = done, total
 		upd.mu.Unlock()
