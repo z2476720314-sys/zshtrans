@@ -248,30 +248,7 @@ func keyByRef(keys config.APIKeys, ref string) string {
 	if ref == "" {
 		return ""
 	}
-	var v string
-	switch ref {
-	case "deepl":
-		v = keys.DeepL
-	case "baidu_appid":
-		v = keys.BaiduAppID
-	case "baidu_key":
-		v = keys.BaiduKey
-	case "niutrans":
-		v = keys.NiuTrans
-	case "ocrspace":
-		v = keys.OCRSpace
-	case "baidu_ocr_ak":
-		v = keys.BaiduOCRAK
-	case "baidu_ocr_sk":
-		v = keys.BaiduOCRsk
-	case "agnes":
-		v = keys.Agnes
-	case "qwen":
-		v = keys.Qwen
-	case "acctoken":
-		v = keys.Acctoken
-	}
-	return strings.TrimSpace(v)
+	return strings.TrimSpace(keys.Get(ref))
 }
 
 // ChatURL 拼接对话端点

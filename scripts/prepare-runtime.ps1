@@ -12,7 +12,7 @@ if (Test-Path -LiteralPath $target) {
     return
 }
 [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target)) | Out-Null
-$release = Invoke-RestMethod -Uri 'https://api.github.com/repos/z2476720314-sys/zshtrans/releases/tags/v3.4'
+$release = Invoke-RestMethod -Uri 'https://api.github.com/repos/z2476720314-sys/zshtrans/releases/tags/v3.4.1'
 $asset = @($release.assets | Where-Object name -eq 'qq-runtime-9.9.30-48517.zip')
 if ($asset.Count -ne 1) { throw 'Pinned capture runtime release asset was not found.' }
 $staging = $target + '.tmp'

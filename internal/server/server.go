@@ -313,24 +313,15 @@ func (s *Server) handleTranslate(w http.ResponseWriter, r *http.Request) {
 
 // maskedKeys 密钥掩码：已设置显示「已保存（不显示）」，未设置显示「未设置」
 func maskedKeys(k config.APIKeys) map[string]string {
-	mask := func(v string) string {
-		if strings.TrimSpace(v) == "" {
-			return ""
+	values := k.Values()
+	for name, value := range values {
+		if strings.TrimSpace(value) == "" {
+			values[name] = ""
+		} else {
+			values[name] = KeySaved
 		}
-		return KeySaved
 	}
-	return map[string]string{
-		"deepl":        mask(k.DeepL),
-		"baidu_appid":  mask(k.BaiduAppID),
-		"baidu_key":    mask(k.BaiduKey),
-		"niutrans":     mask(k.NiuTrans),
-		"ocrspace":     mask(k.OCRSpace),
-		"baidu_ocr_ak": mask(k.BaiduOCRAK),
-		"baidu_ocr_sk": mask(k.BaiduOCRsk),
-		"agnes":        mask(k.Agnes),
-		"qwen":         mask(k.Qwen),
-		"acctoken":     mask(k.Acctoken),
-	}
+	return values
 }
 
 // KeySaved 已保存密钥占位（translate.py KEY_SAVED）
@@ -441,24 +432,12 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			c.Providers = providers.NormalizeProviders(req.Providers)
 		}
 		// 密钥：留空或占位字符串保留原值
-		applyKeys := func(field *string, incoming string) {
+		for name, incoming := range req.APIKeys {
 			v := strings.TrimSpace(incoming)
 			if v == "" || v == KeySaved || v == KeyMissing {
-				return
+				continue
 			}
-			*field = v
-		}
-		if req.APIKeys != nil {
-			applyKeys(&c.APIKeys.DeepL, req.APIKeys["deepl"])
-			applyKeys(&c.APIKeys.BaiduAppID, req.APIKeys["baidu_appid"])
-			applyKeys(&c.APIKeys.BaiduKey, req.APIKeys["baidu_key"])
-			applyKeys(&c.APIKeys.NiuTrans, req.APIKeys["niutrans"])
-			applyKeys(&c.APIKeys.OCRSpace, req.APIKeys["ocrspace"])
-			applyKeys(&c.APIKeys.BaiduOCRAK, req.APIKeys["baidu_ocr_ak"])
-			applyKeys(&c.APIKeys.BaiduOCRsk, req.APIKeys["baidu_ocr_sk"])
-			applyKeys(&c.APIKeys.Agnes, req.APIKeys["agnes"])
-			applyKeys(&c.APIKeys.Qwen, req.APIKeys["qwen"])
-			applyKeys(&c.APIKeys.Acctoken, req.APIKeys["acctoken"])
+			c.APIKeys.Set(name, v)
 		}
 		if msg := validateSettings(*c); msg != "" {
 			return errors.New(msg)

@@ -1,4 +1,4 @@
-# ZSH TRANS v3.4 · 跨境翻译台
+# ZSH TRANS v3.4.1 · 跨境翻译台
 
 面向中俄跨境客服的 Windows 翻译工具：Go 后端、React / TypeScript / Ant Design 前端，由 WebView2 桌面窗口承载。提供文本翻译、全局划词、QQ 原生截图、常用语和用户自主更新，无需安装 Python 或 Qt。
 
@@ -135,7 +135,7 @@ go build -buildvcs=false -ldflags="-s -w -H windowsgui" -o dist/zshtrans.exe ./c
 
 ## 8. 本轮验证范围
 
-源码全量检查：开启 DLL smoke 的 Go 检查中，98 个顶层测试、10 个测试包通过；Go vet 通过，前端 7 项 Node 测试和 TypeScript 检查通过。官方 registry 的 pnpm audit 未报告已知漏洞。浏览器在 1440 / 768 / 390 宽度检查了翻译、设置五个子页、常用语、自检，并实际保存设置。
+源码全量检查：开启 DLL smoke 的 Go 检查中，102 个顶层测试、10 个测试包通过；Go vet 通过，前端 7 项 Node 测试和 TypeScript 检查通过。官方 registry 的 pnpm audit 未报告已知漏洞。浏览器在 1440 / 768 / 390 宽度检查了翻译、设置五个子页、常用语、自检，并实际保存设置。
 
 - 受控验证包括协议、资源 SHA-256、回调生命周期和独立子进程中的 DLL 初始化。剪贴板使用 Win32 shim 验证，仅实际创建隐藏 owner 和分配内存，没有操作用户剪贴板。
 - 本轮未执行真实桌面框选、标注、滚轮长截图、钉图或物理热键操作。组件已接入，真实交互仍需实际使用确认。

@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -11,7 +12,7 @@ import (
 
 const (
 	AppName    = "ZSH TRANS"
-	AppVersion = "v3.4"
+	AppVersion = "v3.4.1"
 	// 原 pyc 常量
 	Timeout  = 8
 	CacheMax = 300
@@ -34,16 +35,17 @@ type Web struct {
 
 // APIKeys 直连翻译接口与 OCR 的密钥
 type APIKeys struct {
-	DeepL      string `json:"deepl"`
-	BaiduAppID string `json:"baidu_appid"`
-	BaiduKey   string `json:"baidu_key"`
-	NiuTrans   string `json:"niutrans"`
-	OCRSpace   string `json:"ocrspace"`
-	BaiduOCRAK string `json:"baidu_ocr_ak"`
-	BaiduOCRsk string `json:"baidu_ocr_sk"`
-	Agnes      string `json:"agnes"`
-	Qwen       string `json:"qwen"`
-	Acctoken   string `json:"acctoken"`
+	DeepL      string            `json:"deepl"`
+	BaiduAppID string            `json:"baidu_appid"`
+	BaiduKey   string            `json:"baidu_key"`
+	NiuTrans   string            `json:"niutrans"`
+	OCRSpace   string            `json:"ocrspace"`
+	BaiduOCRAK string            `json:"baidu_ocr_ak"`
+	BaiduOCRsk string            `json:"baidu_ocr_sk"`
+	Agnes      string            `json:"agnes"`
+	Qwen       string            `json:"qwen"`
+	Acctoken   string            `json:"acctoken"`
+	Extra      map[string]string `json:"-"`
 }
 
 // Model 一个模型条目
@@ -230,6 +232,7 @@ func (s *Store) Get() Config {
 // 既绕过 applyMu 造成数据竞争，也可能把未保存的改动泄漏进当前配置。
 func clone(c Config) Config {
 	out := c
+	out.APIKeys.Extra = maps.Clone(c.APIKeys.Extra)
 	if c.Providers != nil {
 		out.Providers = make([]Provider, len(c.Providers))
 		for i, p := range c.Providers {
