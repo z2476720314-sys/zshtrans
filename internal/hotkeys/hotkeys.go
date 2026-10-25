@@ -111,28 +111,29 @@ type Binding struct {
 	Value string
 }
 
-// Fields 三个可编辑热键（translate.py HOTKEY_FIELDS）
+// Fields 四个可编辑热键
 var Fields = []Binding{
 	{Name: "selection", Label: "划词翻译", Value: ""},
 	{Name: "screenshot", Label: "截图翻译", Value: ""},
-	{Name: "close", Label: "主窗口显隐", Value: ""},
+	{Name: "window", Label: "主窗口显隐", Value: ""},
+	{Name: "close", Label: "隐藏到托盘", Value: ""},
 }
 
 // Validate 校验一组热键：非法格式 / 相互冲突
-func Validate(selection, screenshot, close string) error {
+func Validate(selection, screenshot, window, close string) error {
 	seen := map[uint64]string{}
 	for _, b := range []Binding{
 		{"selection", "划词翻译", selection},
 		{"screenshot", "截图翻译", screenshot},
-		{"close", "主窗口显隐", close},
+		{"window", "主窗口显隐", window},
+		{"close", "隐藏到托盘", close},
 	} {
 		combo, err := Parse(b.Value)
 		if err != nil {
 			return fmt.Errorf("%s热键 %s 无效", b.Label, orEmpty(b.Value))
 		}
 		id := uint64(combo.Mods)<<32 | uint64(combo.Key)
-		if other, ok := seen[id]; ok {
-			_ = other
+		if _, ok := seen[id]; ok {
 			return fmt.Errorf("%s热键与其他操作冲突", b.Label)
 		}
 		seen[id] = b.Name

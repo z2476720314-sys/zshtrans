@@ -17,9 +17,9 @@ func decodeB64(s string) ([]byte, error) {
 
 func envOrNil() func(string) string { return os.Getenv }
 
-// validateHotkeys 三项热键校验（对应 SettingsWindow 热键冲突检测）
+// validateHotkeys 四项热键格式与冲突校验
 func validateHotkeys(h config.Hotkeys) string {
-	if err := hotkeys.Validate(h.Selection, h.Screenshot, h.Close); err != nil {
+	if err := hotkeys.Validate(h.Selection, h.Screenshot, h.Window, h.Close); err != nil {
 		return err.Error()
 	}
 	return ""

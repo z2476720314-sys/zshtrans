@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -34,7 +33,7 @@ const winTitle = "ZSH TRANS · 跨境翻译台"
 
 func main() {
 	var (
-		port    = flag.Int("port", 0, "HTTP 端口（默认读配置，配置缺省 8765）")
+		port    = flag.Int("port", 0, "HTTP 端口（桌面默认自动分配，-web 默认读配置）")
 		host    = flag.String("host", "", "监听地址（默认读配置）")
 		noOpen  = flag.Bool("no-open", false, "不自动打开界面（只起服务）")
 		useWeb  = flag.Bool("web", false, "用默认浏览器承载界面（默认用 WebView2 桌面窗口）")
@@ -113,13 +112,6 @@ func main() {
 	if *host != "" {
 		listenHost = *host
 	}
-	listenPort := cfg.Web.Port
-	if *port > 0 {
-		listenPort = *port
-	}
-	if listenPort == 0 {
-		listenPort = 8765
-	}
 
 	asset, err := fs.Sub(web.Dist, "dist")
 	if err != nil {
@@ -135,7 +127,17 @@ func main() {
 	})
 	defer deskwin.CloseResult()
 	defer capture.CloseInteractive()
-	addr := net.JoinHostPort(listenHost, strconv.Itoa(listenPort))
+	ln, err := openAppListener(listenHost, cfg.Web.Port, *port, *useWeb)
+	if err != nil {
+		logx.Err("listen fail: %v", err)
+		if !*useWeb && !*noOpen {
+			deskwin.ShowError("无法启动本机界面服务：\n\n" + err.Error())
+		}
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	addr := ln.Addr().String()
+	listenPort := ln.Addr().(*net.TCPAddr).Port
 	httpSrv := &http.Server{
 		Addr:              addr,
 		Handler:           srv.Handler(),
@@ -147,12 +149,6 @@ func main() {
 		IdleTimeout: 120 * time.Second,
 	}
 
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		logx.Err("listen %s fail: %v", addr, err)
-		fmt.Fprintf(os.Stderr, "端口 %d 被占用或不可用：%v\n", listenPort, err)
-		os.Exit(1)
-	}
 	logx.Info("http listening on %s", addr)
 
 	localURL := fmt.Sprintf("http://127.0.0.1:%d/", listenPort)
@@ -202,15 +198,17 @@ func main() {
 			logx.Info("hotkey fired: %s", name)
 			server.FireHotkey(app, name)
 		}
-		if err := mgr.Bind(cfg.Hotkeys.Selection, cfg.Hotkeys.Screenshot, cfg.Hotkeys.Window, cfg.Hotkeys.Close, handler); err != nil {
-			logx.Warn("hotkey format invalid: %v", err)
-			fmt.Fprintf(os.Stderr, "快捷键配置无效：%v\n", err)
-			mgr = nil
-		} else if err := mgr.Start(); err != nil {
+		bindErr := mgr.Bind(cfg.Hotkeys.Selection, cfg.Hotkeys.Screenshot, cfg.Hotkeys.Window, cfg.Hotkeys.Close, handler)
+		if bindErr != nil {
+			logx.Warn("hotkey format invalid: %v", bindErr)
+			fmt.Fprintf(os.Stderr, "快捷键配置无效：%v\n", bindErr)
+		}
+		// 即使旧配置无效也保留消息线程，设置修正后可以重新注册。
+		if err := mgr.Start(); err != nil {
 			// 注册失败（被占用）时消息循环仍在跑，改设置里的键位即可热更新生效
 			logx.Warn("hotkeys unavailable: %v", err)
 			fmt.Fprintf(os.Stderr, "快捷键未生效：%v\n", err)
-		} else {
+		} else if bindErr == nil {
 			logx.Info("hotkeys registered")
 		}
 		// 设置页保存后热更新热键（原来只换 cfg 不重建，改了键位要重启才生效）

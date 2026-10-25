@@ -12,13 +12,13 @@ import (
 
 const (
 	AppName    = "ZSH TRANS"
-	AppVersion = "v3.4.1"
+	AppVersion = "v3.4.3"
 	// 原 pyc 常量
 	Timeout  = 8
 	CacheMax = 300
 )
 
-// Hotkeys 三个全局热键（close = 主窗口显隐）
+// Hotkeys 四个全局热键（window = 显隐，close = 隐藏到托盘）
 type Hotkeys struct {
 	Selection  string `json:"selection"`
 	Screenshot string `json:"screenshot"`

@@ -4,6 +4,7 @@ package hotkeys
 
 import (
 	"errors"
+	"fmt"
 	"runtime"
 	"sync"
 	"unsafe"
@@ -55,12 +56,15 @@ type spec struct {
 // 热键永远不会触发）。
 type Manager struct {
 	mu       sync.Mutex
+	updateMu sync.Mutex
 	desired  []spec         // 期望注册的集合（Bind/Rebind 写入）
 	handlers map[int]func() // id → 回调
 	threadID uint32
 	running  bool
 	ready    chan struct{}
 	started  chan error // Start 期间消息线程把注册结果回传
+	applied  chan error
+	done     chan struct{}
 }
 
 // NewManager 创建管理器
@@ -78,40 +82,42 @@ func (m *Manager) Bind(selection, screenshot, window, close string, handler func
 // Rebind 热更新：替换热键集合并通知消息线程重注册。
 // 未 Start 时只存配置；已 Start 时通过 PostThreadMessage 唤醒消息线程执行注销+注册。
 func (m *Manager) Rebind(selection, screenshot, window, close string, handler func(name string)) error {
+	m.updateMu.Lock()
+	defer m.updateMu.Unlock()
+	if err := Validate(selection, screenshot, window, close); err != nil {
+		return err
+	}
 	items := []spec{
 		{1, selection, "selection"},
 		{2, screenshot, "screenshot"},
 		{3, window, "window"},
 		{4, close, "close"},
 	}
-	// 先做格式校验，别把非法配置送到消息线程
-	for _, it := range items {
-		if it.value == "" {
-			continue
-		}
-		if _, err := Parse(it.value); err != nil {
-			return err
-		}
-	}
-
 	m.mu.Lock()
 	m.desired = items
 	m.handlers = map[int]func(){}
 	for _, it := range items {
-		if it.value == "" {
-			continue
-		}
 		name := it.name
 		m.handlers[it.id] = func() { handler(name) }
 	}
-	threadID, running := m.threadID, m.running
+	running, ready, applied, done := m.running, m.ready, m.applied, m.done
 	m.mu.Unlock()
-
-	if running && threadID != 0 {
-		// 让消息线程自己重注册（注册/注销有线程亲和性，不能在这里直接调）
-		procPostThreadMsg.Call(uintptr(threadID), wmApp, 0, 0)
+	if !running {
+		return nil
 	}
-	return nil
+	<-ready
+	m.mu.Lock()
+	threadID := m.threadID
+	m.mu.Unlock()
+	if ok, _, err := procPostThreadMsg.Call(uintptr(threadID), wmApp, 0, 0); ok == 0 {
+		return fmt.Errorf("无法通知热键线程：%w", err)
+	}
+	select {
+	case err := <-applied:
+		return err
+	case <-done:
+		return errors.New("热键消息线程已退出")
+	}
 }
 
 // Start 启动消息循环并在同一线程内注册热键。
@@ -125,12 +131,22 @@ func (m *Manager) Start() error {
 	m.running = true
 	m.ready = make(chan struct{})
 	m.started = make(chan error, 1)
-	ready, started := m.ready, m.started
+	m.applied = make(chan error, 1)
+	m.done = make(chan struct{})
+	ready, started, applied, done := m.ready, m.started, m.applied, m.done
 	m.mu.Unlock()
 
 	go func() {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
+		defer func() {
+			m.unregisterLocked()
+			m.mu.Lock()
+			m.running = false
+			m.threadID = 0
+			m.mu.Unlock()
+			close(done)
+		}()
 
 		var msg msgStruct
 		// 强制创建线程消息队列，否则 PostThreadMessage 会失败
@@ -161,16 +177,11 @@ func (m *Manager) Start() error {
 				}
 			case wmApp:
 				// 配置变了：注销旧的、注册新的
-				if err := m.applyLocked(); err != nil {
-					// 注册失败不致命：保留旧键已注销的状态，界面会显示未生效
-					_ = err
-				}
+				applied <- m.applyLocked()
 			case wmQuit:
-				m.unregisterLocked()
 				return
 			}
 		}
-		m.unregisterLocked()
 	}()
 	<-ready
 
@@ -212,24 +223,21 @@ func (m *Manager) applyLocked() error {
 
 // unregisterLocked 注销当前已注册的热键。调用方必须已在消息线程。
 func (m *Manager) unregisterLocked() {
-	m.mu.Lock()
-	ids := make([]int, 0, len(m.handlers))
-	for id := range m.handlers {
-		ids = append(ids, id)
-	}
-	m.mu.Unlock()
-	for _, id := range ids {
+	for id := 1; id <= 4; id++ {
 		procUnregisterKey.Call(0, uintptr(id))
 	}
 }
 
 // Stop 停止消息循环（消息线程退出前自己注销热键）
 func (m *Manager) Stop() {
+	m.updateMu.Lock()
+	defer m.updateMu.Unlock()
 	m.mu.Lock()
-	threadID := m.threadID
-	m.running = false
+	threadID, done := m.threadID, m.done
 	m.mu.Unlock()
 	if threadID != 0 {
-		procPostThreadMsg.Call(uintptr(threadID), wmQuit, 0, 0)
+		if ok, _, _ := procPostThreadMsg.Call(uintptr(threadID), wmQuit, 0, 0); ok != 0 {
+			<-done
+		}
 	}
 }
