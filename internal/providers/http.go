@@ -2,6 +2,7 @@ package providers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -21,8 +22,8 @@ func newHTTPClient(timeoutSec int) *http.Client {
 	return &http.Client{Timeout: time.Duration(timeoutSec) * time.Second}
 }
 
-func getJSON(u string, hdr map[string]string, out any) error {
-	req, err := http.NewRequest(http.MethodGet, u, nil)
+func getJSON(ctx context.Context, u string, hdr map[string]string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return err
 	}
@@ -33,12 +34,12 @@ func getJSON(u string, hdr map[string]string, out any) error {
 	return doJSON(req, out)
 }
 
-func postJSON(u string, body any, hdr map[string]string, out any) error {
+func postJSON(ctx context.Context, u string, body any, hdr map[string]string, out any) error {
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
@@ -50,8 +51,8 @@ func postJSON(u string, body any, hdr map[string]string, out any) error {
 	return doJSON(req, out)
 }
 
-func postFormJSON(u string, form map[string][]string, hdr map[string]string, out any) error {
-	req, err := http.NewRequest(http.MethodPost, u, bytes.NewBufferString(encodeForm(form)))
+func postFormJSON(ctx context.Context, u string, form map[string][]string, hdr map[string]string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewBufferString(encodeForm(form)))
 	if err != nil {
 		return err
 	}

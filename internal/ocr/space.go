@@ -1,6 +1,7 @@
 package ocr
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -19,23 +20,24 @@ var spacePass = map[string]bool{"1": true, "2": true, "3": true}
 
 // Space OCR.space 识别
 func Space(b64 string, apiKey string, srcLang string) (string, error) {
+	return SpaceContext(context.Background(), b64, apiKey, srcLang)
+}
+
+func SpaceContext(ctx context.Context, b64 string, apiKey string, srcLang string) (string, error) {
 	if strings.TrimSpace(apiKey) == "" {
 		return "", errors.New("ocr.space key empty")
 	}
-	lang := "auto"
-	if srcLang == "ru" {
-		lang = "rus"
-	}
 	form := url.Values{}
 	form.Set("apikey", apiKey)
-	form.Set("language", lang)
-	form.Set("OCREngine", "2")
+	// Engine 2 把清晰中英混排标题识成拉丁字母；同图 Engine 3 保留了中文和型号。
+	form.Set("language", "auto")
+	form.Set("OCREngine", "3")
 	form.Set("scale", "true")
 	form.Set("isOverlayRequired", "false")
 	form.Set("filetype", "PNG")
 	form.Set("base64Image", "data:image/png;base64,"+b64)
 
-	req, err := http.NewRequest(http.MethodPost, SpaceURL, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, SpaceURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", err
 	}
@@ -54,6 +56,7 @@ func Space(b64 string, apiKey string, srcLang string) (string, error) {
 		} `json:"ParsedResults"`
 		IsErroredOnProcessing bool `json:"IsErroredOnProcessing"`
 		OCRExitCode           any  `json:"OCRExitCode"`
+		ErrorMessage          any  `json:"ErrorMessage"`
 		ErrorDetails          any  `json:"ErrorDetails"`
 	}
 	if err := decodeJSON(resp, &payload); err != nil {
@@ -61,11 +64,16 @@ func Space(b64 string, apiKey string, srcLang string) (string, error) {
 	}
 	code := fmt.Sprint(payload.OCRExitCode)
 	if payload.IsErroredOnProcessing || (code != "<nil>" && code != "" && !spacePass[code]) {
-		detail := fmt.Sprint(payload.ErrorDetails)
-		if detail == "<nil>" {
-			detail = ""
+		var details []string
+		for _, value := range []any{payload.ErrorMessage, payload.ErrorDetails} {
+			if value != nil && strings.TrimSpace(fmt.Sprint(value)) != "" {
+				details = append(details, fmt.Sprint(value))
+			}
 		}
-		return "", fmt.Errorf("ocr error: %s", detail)
+		if len(details) == 0 {
+			details = append(details, "识别失败，服务未提供详细原因")
+		}
+		return "", fmt.Errorf("ocr.space engine 3 (code %s): %s", code, strings.Join(details, "; "))
 	}
 	var sb strings.Builder
 	for _, r := range payload.ParsedResults {
@@ -99,10 +107,14 @@ func ResetBaiduToken() {
 
 // Baidu 百度 OCR 通用文字识别
 func Baidu(b64 string, ak, sk string) (string, error) {
+	return BaiduContext(context.Background(), b64, ak, sk)
+}
+
+func BaiduContext(ctx context.Context, b64 string, ak, sk string) (string, error) {
 	if strings.TrimSpace(ak) == "" || strings.TrimSpace(sk) == "" {
 		return "", errors.New("baidu ocr key not set")
 	}
-	token, err := baiduAccess(ak, sk)
+	token, err := baiduAccess(ctx, ak, sk)
 	if err != nil {
 		return "", err
 	}
@@ -110,8 +122,10 @@ func Baidu(b64 string, ak, sk string) (string, error) {
 	form.Set("image", b64)
 	form.Set("language_type", "auto_detect")
 
-	endpoint := "https://aip.baidubce.com/rest/2.0/ocr/v1/general_basic?access_token=" + url.QueryEscape(token)
-	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	query := url.Values{}
+	query.Set("access_token", token)
+	endpoint := "https://aip.baidubce.com/rest/2.0/ocr/v1/general_basic?" + query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", err
 	}
@@ -150,7 +164,7 @@ func Baidu(b64 string, ak, sk string) (string, error) {
 }
 
 // baiduAccess 取 token，命中缓存直接用
-func baiduAccess(ak, sk string) (string, error) {
+func baiduAccess(ctx context.Context, ak, sk string) (string, error) {
 	// 3 个候选会并行调 Baidu，缓存必须加锁（原来是无同步的包级变量，data race）
 	baiduMu.Lock()
 	if baiduToken.value != "" && time.Now().Before(baiduToken.exp) {
@@ -161,13 +175,16 @@ func baiduAccess(ak, sk string) (string, error) {
 	baiduMu.Unlock()
 	// 取 token 要走网络，不能占着缓存锁；用独立的 fetch 锁串行化，
 	// 拿到锁后先复查缓存（可能别人刚取回来）
-	return baiduFetch(ak, sk)
+	return baiduFetch(ctx, ak, sk)
 }
 
 // baiduFetch 真正发起 token 请求并写回缓存
-func baiduFetch(ak, sk string) (string, error) {
+func baiduFetch(ctx context.Context, ak, sk string) (string, error) {
 	baiduFetchMu.Lock()
 	defer baiduFetchMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 
 	baiduMu.Lock()
 	if baiduToken.value != "" && time.Now().Before(baiduToken.exp) {
@@ -183,7 +200,11 @@ func baiduFetch(ak, sk string) (string, error) {
 	q.Set("client_secret", sk)
 	endpoint := "https://aip.baidubce.com/oauth/2.0/token?" + q.Encode()
 	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Get(endpoint)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}

@@ -2,14 +2,16 @@
 //
 // 关键约束：Windows 上运行中的 exe 无法被覆盖或删除。所以更新流程是
 //  1. 新版本下载到临时目录；
-//  2. 写一个 .bat 到临时目录，内容是「等当前进程退出 → 覆盖 exe → 启动新 exe → 删自己」；
-//  3. 用 cmd /c 分离启动该 .bat，然后本进程退出。
+//  2. 启动无窗口 PowerShell，等待本进程正常退出；
+//  3. 同目录暂存、校验、替换并重启，保留 .old 供回滚。
 //
 // 用户若选择「稍后」，只记录版本号，下次启动再问；「跳过此版本」则写进配置不再提示。
 package update
 
 import (
-	"encoding/binary"
+	"context"
+	"crypto/sha256"
+	"debug/pe"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,13 +19,13 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/local/zshtrans/internal/config"
 )
 
 // Repo 默认 GitHub 仓库（owner/name）
@@ -47,15 +49,17 @@ type Release struct {
 	URL     string `json:"url"`     // 首选下载地址
 	// URLs 备选下载地址（按顺序尝试）。第一个是 api.github.com 的资源端点，
 	// 第二个是 github.com 的 browser_download_url。
-	URLs []string `json:"urls"`
-	Size int64    `json:"size"`
+	URLs   []string `json:"urls"`
+	Size   int64    `json:"size"`
+	Digest string   `json:"digest"`
 }
 
 // Asset Release 附件
 type Asset struct {
-	ID   int64  `json:"id"`
-	Name string `json:"name"`
-	Size int64  `json:"size"`
+	ID     int64  `json:"id"`
+	Name   string `json:"name"`
+	Size   int64  `json:"size"`
+	Digest string `json:"digest"`
 	// URL 是 api.github.com 的资源端点，需带 Accept: application/octet-stream
 	// 才会 302 到真实文件。国内网络到 github.com 常连不上，但到 api.github.com
 	// 与 release-assets.githubusercontent.com 是通的，所以这个端点才是主路径。
@@ -71,8 +75,9 @@ var client = &http.Client{Timeout: 20 * time.Second}
 
 // downloadClient 下载专用：整个响应体的传输可能几十秒，不能沿用 20s 总超时
 // （实测 10MB 包在国内网络 20s 只到 1.2MB 就 Client.Timeout 中断）。
-// 这里只限制连接与首字节，传输阶段靠调用方的 context 与 progress 收尾。
+// 总超时覆盖响应体停滞，主动取消通过 request context 传递。
 var downloadClient = &http.Client{
+	Timeout: 3 * time.Minute,
 	Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           (&net.Dialer{Timeout: 20 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
@@ -135,6 +140,7 @@ func CheckRepo(repo, current string) (*Release, error) {
 			continue
 		}
 		best.Size = a.Size
+		best.Digest = a.Digest
 		// 顺序有讲究：api.github.com 的资源端点在国内网络可达，
 		// github.com 的 browser_download_url 经常直接连不上（实测超时 8s 无响应）。
 		if a.URL != "" {
@@ -225,6 +231,46 @@ func Download(url, dest string, progress func(done, total int64)) error {
 // 传入 rel.URLs 时首选 api.github.com 的资源端点（国内可达），失败再退回
 // github.com 的 browser_download_url。
 func DownloadAny(urls []string, dest string, progress func(done, total int64)) error {
+	return downloadAny(context.Background(), urls, dest, progress)
+}
+
+// DownloadRelease 仅将与 GitHub 附件大小及 SHA256 一致的文件标记为可安装。
+func DownloadRelease(ctx context.Context, rel *Release, dest string, progress func(done, total int64)) error {
+	if rel == nil || rel.Size <= 0 || !regexp.MustCompile(`^sha256:[a-fA-F0-9]{64}$`).MatchString(rel.Digest) {
+		return errors.New("发布附件缺少有效的大小或 SHA256，不能安装")
+	}
+	if err := downloadAny(ctx, rel.URLs, dest, progress); err != nil {
+		return err
+	}
+	if err := VerifyRelease(rel, dest); err != nil {
+		_ = os.Remove(dest)
+		return err
+	}
+	return nil
+}
+
+// VerifyRelease 在安装前再次校验，防止已下载文件被改动。
+func VerifyRelease(rel *Release, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return err
+	}
+	if rel == nil || n != rel.Size {
+		return errors.New("安装包大小与发布信息不一致，请重新下载")
+	}
+	if !strings.EqualFold("sha256:"+fmt.Sprintf("%x", h.Sum(nil)), rel.Digest) {
+		return errors.New("安装包 SHA256 不匹配，请重新下载")
+	}
+	return checkPE(path)
+}
+
+func downloadAny(ctx context.Context, urls []string, dest string, progress func(done, total int64)) error {
 	var list []string
 	for _, u := range urls {
 		if strings.TrimSpace(u) != "" {
@@ -239,11 +285,14 @@ func DownloadAny(urls []string, dest string, progress func(done, total int64)) e
 	}
 	var errs []string
 	for _, u := range list {
-		err := downloadRetry(u, dest, progress)
+		err := downloadRetry(ctx, u, dest, progress)
 		if err == nil {
 			return nil
 		}
 		errs = append(errs, hostOf(u)+": "+err.Error())
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 	}
 	if len(errs) == 1 {
 		return errors.New(errs[0])
@@ -263,29 +312,36 @@ func hostOf(raw string) string {
 }
 
 // downloadRetry 对单个地址做有限次重试
-func downloadRetry(url, dest string, progress func(done, total int64)) error {
+func downloadRetry(ctx context.Context, url, dest string, progress func(done, total int64)) error {
 	const attempts = 3
 	var lastErr error
 	for i := 0; i < attempts; i++ {
 		if i > 0 {
 			// 指数退避，给不稳定的出口一点恢复时间
-			time.Sleep(time.Duration(i) * 2 * time.Second)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(i) * 2 * time.Second):
+			}
 			if progress != nil {
 				progress(0, 0) // 重置进度显示
 			}
 		}
-		err := downloadOnce(url, dest, progress)
+		err := downloadOnce(ctx, url, dest, progress)
 		if err == nil {
 			return nil
 		}
 		lastErr = err
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 	}
 	return fmt.Errorf("下载失败（已重试 %d 次）：%w", attempts, lastErr)
 }
 
 // downloadOnce 单次下载：写 .part → 校验长度/非空/PE 头 → 改名
-func downloadOnce(url, dest string, progress func(done, total int64)) error {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+func downloadOnce(ctx context.Context, url, dest string, progress func(done, total int64)) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
@@ -354,33 +410,24 @@ func downloadOnce(url, dest string, progress func(done, total int64)) error {
 	return os.Rename(tmp, dest)
 }
 
-// checkPE 校验文件开头是 Windows PE（MZ + PE\0\0 签名）
+// checkPE 校验可执行映像及全部段，拒绝仅有 PE 头的截断文件。
 func checkPE(path string) error {
-	f, err := os.Open(path)
+	f, err := pe.Open(path)
+	if err != nil {
+		return fmt.Errorf("安装包不是有效的 Windows 可执行文件：%w", err)
+	}
+	defer f.Close()
+	if f.Machine != pe.IMAGE_FILE_MACHINE_AMD64 || f.OptionalHeader == nil || len(f.Sections) == 0 || f.Characteristics&pe.IMAGE_FILE_EXECUTABLE_IMAGE == 0 {
+		return errors.New("安装包不是完整的 Windows x64 程序")
+	}
+	st, err := os.Stat(path)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	head := make([]byte, 64)
-	if _, err := io.ReadFull(f, head); err != nil {
-		return errors.New("下载内容不是有效的可执行文件（文件过短）")
-	}
-	if head[0] != 'M' || head[1] != 'Z' {
-		return errors.New("下载内容不是有效的可执行文件（缺少 MZ 头）")
-	}
-	off := int64(binary.LittleEndian.Uint32(head[0x3C:]))
-	if off <= 0 || off > 1<<20 {
-		return errors.New("下载内容不是有效的可执行文件（PE 偏移异常）")
-	}
-	if _, err := f.Seek(off, io.SeekStart); err != nil {
-		return err
-	}
-	sig := make([]byte, 4)
-	if _, err := io.ReadFull(f, sig); err != nil {
-		return errors.New("下载内容不是有效的可执行文件（PE 头缺失）")
-	}
-	if sig[0] != 'P' || sig[1] != 'E' || sig[2] != 0 || sig[3] != 0 {
-		return errors.New("下载内容不是有效的可执行文件（PE 签名错误）")
+	for _, section := range f.Sections {
+		if section.Size > 0 && int64(section.Offset)+int64(section.Size) > st.Size() {
+			return errors.New("安装包内容不完整，请重新下载")
+		}
 	}
 	return nil
 }
@@ -388,58 +435,7 @@ func checkPE(path string) error {
 // Apply 把已下载的新 exe 换上并重启。当前进程应立即退出。
 //
 // 做法：写一个分离的 .bat，等 1.5s（让本进程释放 exe 句柄）后复制覆盖并重启。
-func Apply(newExe string) error {
-	self, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("定位自身失败：%w", err)
-	}
-	self, err = filepath.Abs(self)
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(newExe); err != nil {
-		return fmt.Errorf("新版本文件不存在：%w", err)
-	}
-
-	// 唯一文件名：固定名在多个实例/连续两次更新时会互相覆盖，跑到一半的脚本被改掉
-	script := filepath.Join(os.TempDir(), fmt.Sprintf("zshtrans-update-%d.bat", os.Getpid()))
-	backup := self + ".old"
-	// 只杀自己这个 PID（按映像名 taskkill /im 会连带杀掉其他目录下同名的实例）
-	// copy 先备份再覆盖，失败时把备份还原回去，不让用户拿着半个 exe
-	content := strings.Join([]string{
-		"@echo off",
-		"chcp 65001 >nul",
-		"ping -n 3 127.0.0.1 >nul",
-		"taskkill /f /pid " + strconv.Itoa(os.Getpid()) + " >nul 2>&1",
-		"ping -n 2 127.0.0.1 >nul",
-		"if exist \"" + backup + "\" del /f /q \"" + backup + "\"",
-		"move /y \"" + self + "\" \"" + backup + "\" >nul 2>&1",
-		"copy /y \"" + newExe + "\" \"" + self + "\" >nul 2>&1",
-		"if errorlevel 1 goto rollback",
-		"del /f /q \"" + backup + "\" >nul 2>&1",
-		"start \"\" \"" + self + "\"",
-		"del \"%~f0\"",
-		"exit /b 0",
-		":rollback",
-		"if exist \"" + backup + "\" move /y \"" + backup + "\" \"" + self + "\" >nul 2>&1",
-		"start \"\" \"" + self + "\"",
-		"del \"%~f0\"",
-		"exit /b 1",
-	}, "\r\n")
-	if err := os.WriteFile(script, []byte(content), 0o644); err != nil {
-		return fmt.Errorf("写入更新脚本失败：%w", err)
-	}
-
-	cmd := exec.Command("cmd", "/c", "start", "/min", "", script)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x00000008} // DETACHED_PROCESS
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("启动更新脚本失败：%w", err)
-	}
-	go func() { _ = cmd.Wait() }()
-	return nil
-}
-
 // TempPath 新版本的临时落地路径
 func TempPath(version string) string {
-	return filepath.Join(os.TempDir(), fmt.Sprintf("zshtrans-%s.exe", strings.NewReplacer("/", "_", "\\", "_", ":", "_").Replace(version)))
+	return filepath.Join(config.BaseDir(), ".updates", fmt.Sprintf("zshtrans-%s.exe", strings.NewReplacer("/", "_", "\\", "_", ":", "_").Replace(version)))
 }

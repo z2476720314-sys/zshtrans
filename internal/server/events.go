@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,7 +10,6 @@ import (
 
 	"github.com/local/zshtrans/internal/capture"
 	"github.com/local/zshtrans/internal/logx"
-	"github.com/local/zshtrans/internal/ocr"
 )
 
 // Event 服务端推送事件（供前端 EventSource 订阅）
@@ -118,10 +118,28 @@ type Windower interface {
 	Toggle()
 	Navigate(url string)
 	Available() bool
+	Visible() bool
+	PrepareSelection() bool
 }
 
 // SetWindower 注入桌面窗口控制器（可传 nil）
 func (s *Server) SetWindower(w Windower) { s.app.setWindower(w) }
+
+func (s *Server) SetResultHook(fn func(Result)) {
+	s.app.mu.Lock()
+	s.app.onResult = fn
+	s.app.mu.Unlock()
+}
+
+func (a *App) showResult(result Result) {
+	a.mu.RLock()
+	fn := a.onResult
+	a.mu.RUnlock()
+	if fn != nil {
+		fn(result)
+	}
+	a.Publish(Event{Kind: "popup", Data: result})
+}
 
 // toggleWindow 显隐主窗口：有桌面窗口就操作真窗口，否则退回 SSE 通知前端
 func toggleWindow(app *App) {
@@ -148,32 +166,27 @@ func FireHotkey(app *App, name string) {
 		go func() {
 			text, err := capture.SelectedText(1200 * time.Millisecond)
 			if err != nil {
-				logx.Warn("selection capture fail: %v", err)
-				app.Publish(Event{Kind: "log", Data: err.Error()})
+				app.showResult(Result{Text: "取词失败：" + err.Error(), Provider: "错误"})
 				return
 			}
-			app.Publish(Event{Kind: "popup", Data: translatePopup(app, text, "")})
+			out, err := translatePopup(context.Background(), app, text, "")
+			if err != nil {
+				app.showResult(Result{Source: text, Text: "翻译失败：" + err.Error(), Provider: "错误"})
+				return
+			}
+			app.showResult(out)
 		}()
 	case "screenshot":
 		go func() {
-			raw, err := capture.Screenshot()
+			out, err := capturePopup(context.Background(), app, captureRequest{})
 			if err != nil {
-				logx.Warn("screenshot fail: %v", err)
-				app.Publish(Event{Kind: "log", Data: err.Error()})
+				logx.Warn("screenshot failed: %v", err)
+				app.showResult(Result{Text: "截图取词失败：" + err.Error(), Provider: "错误"})
 				return
 			}
-			img, err := ocr.Decode(raw)
-			if err != nil {
-				app.Publish(Event{Kind: "log", Data: "bad image: " + err.Error()})
-				return
+			if out.Action != "cancel" && out.Action != "complete" {
+				app.showResult(out)
 			}
-			res, err := ocr.Run(img, app.ocrKeys(app.Config()))
-			if err != nil {
-				logx.Warn("screenshot ocr fail: %v", err)
-				app.Publish(Event{Kind: "log", Data: err.Error()})
-				return
-			}
-			app.Publish(Event{Kind: "popup", Data: translatePopup(app, res.Text, res.Engine)})
 		}()
 	case "window":
 		toggleWindow(app)

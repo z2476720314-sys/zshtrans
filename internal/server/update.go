@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"sync"
@@ -13,13 +14,15 @@ import (
 
 // updateState 更新流程的内存状态（下载进度 / 已下载路径）
 type updateState struct {
-	mu      sync.Mutex
-	rel     *update.Release
-	path    string
-	done    int64
-	total   int64
-	busy    bool
-	lastErr string
+	mu         sync.Mutex
+	rel        *update.Release
+	path       string
+	done       int64
+	total      int64
+	busy       bool
+	lastErr    string
+	cancel     context.CancelFunc
+	installing bool
 }
 
 var upd updateState
@@ -86,20 +89,12 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 
 	// 记录「跳过此版本」
 	if req.Skip != "" {
-		cfg := s.app.Config()
-		cfg.UpdateSkipped = req.Skip
-		if err := s.app.Apply(cfg); err != nil {
+		if err := s.app.Mutate(func(cfg *config.Config) error { cfg.UpdateSkipped = req.Skip; return nil }); err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "skipped": req.Skip})
 		return
-	}
-
-	cfg := s.app.Config()
-	repo := cfg.UpdateRepo
-	if repo == "" {
-		repo = update.Repo
 	}
 
 	// status 是只读轮询，必须能在下载进行中调用；否则前端 700ms 轮询每次都被 409
@@ -108,14 +103,38 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		upd.mu.Lock()
 		defer upd.mu.Unlock()
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":    true,
-			"busy":  upd.busy,
-			"done":  upd.done,
-			"total": upd.total,
-			"ready": upd.path != "",
-			"error": upd.lastErr,
+			"ok":         true,
+			"busy":       upd.busy,
+			"done":       upd.done,
+			"total":      upd.total,
+			"ready":      upd.path != "" && !upd.busy,
+			"installing": upd.installing,
+			"error":      upd.lastErr,
 		})
 		return
+	}
+	if req.Action == "cancel" {
+		upd.mu.Lock()
+		defer upd.mu.Unlock()
+		if upd.installing {
+			writeErr(w, http.StatusConflict, "安装已开始，请等待重启")
+			return
+		}
+		if upd.cancel != nil {
+			upd.cancel()
+		}
+		upd.path = ""
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "state": "cancelled"})
+		return
+	}
+	if req.Action != "" && req.Action != "download" && req.Action != "install" {
+		writeErr(w, http.StatusBadRequest, "未知动作")
+		return
+	}
+	cfg := s.app.Config()
+	repo := cfg.UpdateRepo
+	if repo == "" {
+		repo = update.Repo
 	}
 
 	upd.mu.Lock()
@@ -138,19 +157,24 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		upd.busy = true
+		ctx, cancel := context.WithCancel(context.Background())
+		upd.cancel = cancel
+		upd.path = ""
 		upd.done, upd.total, upd.lastErr = 0, 0, ""
 		upd.mu.Unlock()
 		release := func() {
 			upd.mu.Lock()
 			upd.busy = false
+			upd.cancel = nil
 			upd.mu.Unlock()
+			cancel()
 		}
 		// 下面任何提前 return 都要释放占位
 		fail := func(code int, msg string) {
 			release()
 			writeErr(w, code, msg)
 		}
-		if rel == nil {
+		{
 			got, err := update.CheckRepo(repo, config.AppVersion)
 			if err != nil {
 				fail(http.StatusBadGateway, err.Error())
@@ -165,7 +189,11 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 			upd.rel = got
 			upd.mu.Unlock()
 		}
-		go downloadAsync(rel)
+		if ctx.Err() != nil {
+			fail(http.StatusConflict, "下载已取消")
+			return
+		}
+		go downloadAsync(ctx, rel)
 		writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "state": "downloading"})
 		return
 	}
@@ -193,8 +221,26 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "安装包已失效，请重新下载")
 			return
 		}
-		if err := update.Apply(path); err != nil {
+		upd.mu.Lock()
+		if upd.busy || upd.path != path {
+			upd.mu.Unlock()
+			writeErr(w, http.StatusConflict, "已有更新任务在进行")
+			return
+		}
+		upd.busy, upd.installing = true, true
+		upd.mu.Unlock()
+		failInstall := func(err error) {
+			upd.mu.Lock()
+			upd.busy, upd.installing, upd.lastErr = false, false, err.Error()
+			upd.mu.Unlock()
 			writeErr(w, http.StatusInternalServerError, err.Error())
+		}
+		if err := update.VerifyRelease(rel, path); err != nil {
+			failInstall(err)
+			return
+		}
+		if err := update.Apply(path); err != nil {
+			failInstall(err)
 			return
 		}
 		logx.Info("update applied: %s -> %s, restarting", config.AppVersion, rel.Version)
@@ -220,17 +266,25 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	writeErr(w, http.StatusBadRequest, "未知动作")
 }
 
-func downloadAsync(rel *update.Release) {
+func downloadAsync(ctx context.Context, rel *update.Release) {
 	path := update.TempPath(rel.Version)
 	// 优先 api.github.com 的资源端点（国内可达），失败再退回 github.com 直链
-	err := update.DownloadAny(rel.URLs, path, func(done, total int64) {
+	err := update.DownloadRelease(ctx, rel, path, func(done, total int64) {
 		upd.mu.Lock()
 		upd.done, upd.total = done, total
 		upd.mu.Unlock()
 	})
 	upd.mu.Lock()
 	defer upd.mu.Unlock()
+	if err == nil && ctx.Err() != nil {
+		err = ctx.Err()
+		_ = os.Remove(path)
+	}
 	upd.busy = false
+	if upd.cancel != nil {
+		upd.cancel()
+		upd.cancel = nil
+	}
 	if err != nil {
 		upd.lastErr = err.Error()
 		upd.path = ""

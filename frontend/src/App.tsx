@@ -79,7 +79,7 @@ export default function App() {
     if (ev.kind === 'ready') {
       // 通道就绪心跳，不打扰用户
     } else if (ev.kind === 'popup' && ev.data) {
-      setPopup(ev.data as Popup)
+      if (!status?.desktop) setPopup(ev.data as Popup)
       void refresh()
     } else if (ev.kind === 'log') {
       // 后端热键链路失败（取词失败/截图失败/OCR 失败）透传成前端提示，
@@ -90,7 +90,7 @@ export default function App() {
     } else if (ev.kind === 'close') {
       message.info('隐藏到托盘热键已触发')
     }
-  })
+  }, status?.local ?? false)
 
   // 划词弹窗：点击外部 / 按 Esc 关闭（对应 translate.py PopupClickMonitor）
   useEffect(() => {
@@ -105,7 +105,9 @@ export default function App() {
     }
     document.addEventListener('mousedown', onDown)
     document.addEventListener('keydown', onKey)
+    const timer = window.setTimeout(() => setPopup(null), 15000)
     return () => {
+      window.clearTimeout(timer)
       document.removeEventListener('mousedown', onDown)
       document.removeEventListener('keydown', onKey)
     }
@@ -127,9 +129,6 @@ export default function App() {
           {healthy}/{chain.length} 提供方健康
         </span>
         <span className="pill">缓存 {status.cache}</span>
-        {status.lan && status.lan !== '127.0.0.1' && (
-          <span className="pill mono">局域网 {status.lan}</span>
-        )}
       </>
     )
   }, [status, chain])
@@ -141,24 +140,19 @@ export default function App() {
 
   return (
     <>
-      <div className="aurora">
-        <i />
-        <i />
-        <i />
-      </div>
-
       <div className="shell">
         <header className="topbar">
           <div className="brand">
-            <b>{status?.app ?? 'ZSH TRANS'}</b>
-            <span>跨境翻译台 · {status?.version ?? 'v3.0'}</span>
+            <h1>{status?.app ?? 'ZSH TRANS'}</h1>
+            <span>跨境翻译台 · {status?.version ?? '正在连接'}</span>
           </div>
 
           <div className="seg" style={{ marginLeft: 8 }}>
-            {TABS.map((t) => (
+            {TABS.filter((t) => t.key === 'translate' || status?.local).map((t) => (
               <button
                 key={t.key}
                 className={tab === t.key ? 'on' : ''}
+                aria-pressed={tab === t.key}
                 onClick={() => setTab(t.key)}
                 type="button"
               >
@@ -168,24 +162,27 @@ export default function App() {
           </div>
 
           <div className="spacer" />
-          <UpdatePanel version={status?.version} />
+          {status?.local && <UpdatePanel auto={status.update_check} version={status.version} />}
           {pills}
-          <Tooltip title={online ? '热键事件通道已连接' : '热键事件通道重连中'}>
+          {status?.local && <Tooltip title={online ? '热键事件通道已连接' : '热键事件通道重连中'}>
             <span className={`pill ${online ? 'ok' : 'err'}`}>
               <HeartOutlined /> {online ? '实时' : '离线'}
             </span>
-          </Tooltip>
+          </Tooltip>}
         </header>
 
         <main className="body">
-          {tab === 'translate' && (
+          <div className="translate-view" hidden={tab !== 'translate'}>
             <Translate
+              active={tab === 'translate'}
+              localAccess={status?.local ?? false}
+              initialDirection={status ? { src: status.src, tgt: status.tgt } : undefined}
               languages={languages}
               targetLanguages={targetLanguages}
               onTranslated={onTranslated}
               insert={insert}
             />
-          )}
+          </div>
           {tab === 'phrases' && <Phrases onInsert={insertPhrase} />}
           {tab === 'settings' && <Settings onSaved={() => void refresh()} />}
           {tab === 'selfcheck' && <SelfCheckPanel />}
@@ -226,6 +223,7 @@ export default function App() {
               <Button
                 size="small"
                 type="text"
+                aria-label="复制弹窗译文"
                 icon={<CopyOutlined />}
                 onClick={() => void navigator.clipboard.writeText(popup.text).then(
                   () => message.success('已复制'),
@@ -233,7 +231,7 @@ export default function App() {
                 )}
               />
             </Tooltip>
-            <Button size="small" type="text" icon={<CloseOutlined />} onClick={() => setPopup(null)} />
+            <Button aria-label="关闭译文弹窗" size="small" type="text" icon={<CloseOutlined />} onClick={() => setPopup(null)} />
           </div>
           <div className="popup-body">
             <div className="src">{popup.source}</div>

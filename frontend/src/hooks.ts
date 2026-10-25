@@ -7,12 +7,13 @@ export type ServerEvent = {
 }
 
 /** 订阅 /api/events；返回连接状态 */
-export function useEvents(onEvent: (ev: ServerEvent) => void) {
+export function useEvents(onEvent: (ev: ServerEvent) => void, enabled = true) {
   const [online, setOnline] = useState(false)
   const cbRef = useRef(onEvent)
   cbRef.current = onEvent
 
   useEffect(() => {
+    if (!enabled) return
     let es: EventSource | null = null
     let closed = false
     let retry = 0
@@ -47,7 +48,7 @@ export function useEvents(onEvent: (ev: ServerEvent) => void) {
       es?.close()
       setOnline(false)
     }
-  }, [])
+  }, [enabled])
 
   return online
 }

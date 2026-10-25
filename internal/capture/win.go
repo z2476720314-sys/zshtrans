@@ -3,7 +3,10 @@
 package capture
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -18,18 +21,19 @@ var (
 	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
 	gdi32    = windows.NewLazySystemDLL("gdi32.dll")
 
-	procOpenClipboard          = user32.NewProc("OpenClipboard")
-	procCloseClipboard         = user32.NewProc("CloseClipboard")
-	procGetClipboardSequenceNo = user32.NewProc("GetClipboardSequenceNumber")
-	procGetClipboardData       = user32.NewProc("GetClipboardData")
-	procIsClipboardFormatAvail = user32.NewProc("IsClipboardFormatAvailable")
-	procEmptyClipboard         = user32.NewProc("EmptyClipboard")
-	procSetClipboardData       = user32.NewProc("SetClipboardData")
-	procGetAsyncKeyState       = user32.NewProc("GetAsyncKeyState")
-	procKeybdEvent             = user32.NewProc("keybd_event")
-	procGetSystemMetrics       = user32.NewProc("GetSystemMetrics")
-	procGetDC                  = user32.NewProc("GetDC")
-	procReleaseDC              = user32.NewProc("ReleaseDC")
+	procOpenClipboard          nativeProcedure = user32.NewProc("OpenClipboard")
+	procCloseClipboard         nativeProcedure = user32.NewProc("CloseClipboard")
+	procGetClipboardSequenceNo nativeProcedure = user32.NewProc("GetClipboardSequenceNumber")
+	procGetClipboardData       nativeProcedure = user32.NewProc("GetClipboardData")
+	procIsClipboardFormatAvail                 = user32.NewProc("IsClipboardFormatAvailable")
+	procEmptyClipboard         nativeProcedure = user32.NewProc("EmptyClipboard")
+	procSetClipboardData       nativeProcedure = user32.NewProc("SetClipboardData")
+	procGetAsyncKeyState                       = user32.NewProc("GetAsyncKeyState")
+	procKeybdEvent                             = user32.NewProc("keybd_event")
+	procSendInput                              = user32.NewProc("SendInput")
+	procGetSystemMetrics                       = user32.NewProc("GetSystemMetrics")
+	procGetDC                                  = user32.NewProc("GetDC")
+	procReleaseDC                              = user32.NewProc("ReleaseDC")
 
 	procGlobalAlloc  = kernel32.NewProc("GlobalAlloc")
 	procGlobalFree   = kernel32.NewProc("GlobalFree")
@@ -74,88 +78,83 @@ func ModifiersDown() (ctrl, alt, shift bool) {
 }
 
 // SendCtrlC 模拟 Ctrl+C（对应 send_ctrl_c）
-func SendCtrlC() {
-	procKeybdEvent.Call(vkControl, 0, 0, 0)
-	procKeybdEvent.Call('C', 0, 0, 0)
-	procKeybdEvent.Call('C', 0, keyeventfKeyup, 0)
-	procKeybdEvent.Call(vkControl, 0, keyeventfKeyup, 0)
+func SendCtrlC() { _ = sendCopyInput() }
+
+type nativeMouseInput struct {
+	DX, DY            int32
+	Data, Flags, Time uint32
+	ExtraInfo         uintptr
+}
+type nativeKeyboardInput struct {
+	VK, Scan    uint16
+	Flags, Time uint32
+	ExtraInfo   uintptr
+}
+type nativeInput struct {
+	Type uint32
+	_    [0]uintptr
+	Data [unsafe.Sizeof(nativeMouseInput{})]byte
 }
 
-// ReadClipboard 读取剪贴板文本
-func ReadClipboard() (string, error) {
-	ok, _, err := procOpenClipboard.Call(0)
-	if ok == 0 {
-		return "", errors.New("open clipboard fail: " + err.Error())
+func sendCopyInput() error {
+	inputs := make([]nativeInput, 4)
+	for i, key := range []uint16{vkControl, 'C', 'C', vkControl} {
+		inputs[i].Type = 1
+		keyboard := (*nativeKeyboardInput)(unsafe.Pointer(&inputs[i].Data[0]))
+		keyboard.VK = key
+		if i >= 2 {
+			keyboard.Flags = keyeventfKeyup
+		}
 	}
-	defer procCloseClipboard.Call()
-
-	avail, _, _ := procIsClipboardFormatAvail.Call(cfUnicodeText)
-	if avail == 0 {
-		return "", errors.New("clipboard has no text")
-	}
-	handle, _, _ := procGetClipboardData.Call(cfUnicodeText)
-	if handle == 0 {
-		return "", errors.New("get clipboard data fail")
-	}
-	ptr, _, _ := procGlobalLock.Call(handle)
-	if ptr == 0 {
-		return "", errors.New("lock clipboard fail")
-	}
-	defer procGlobalUnlock.Call(handle)
-	return windows.UTF16PtrToString((*uint16)(unsafe.Pointer(ptr))), nil
-}
-
-// WriteClipboard 写入剪贴板文本
-func WriteClipboard(text string) error {
-	utf16, err := windows.UTF16FromString(text)
-	if err != nil {
-		return err
-	}
-	size := uintptr(len(utf16) * 2)
-	handle, _, _ := procGlobalAlloc.Call(gmemMoveable, size)
-	if handle == 0 {
-		return errors.New("global alloc fail")
-	}
-	ptr, _, _ := procGlobalLock.Call(handle)
-	if ptr == 0 {
-		procGlobalFree.Call(handle)
-		return errors.New("global lock fail")
-	}
-	copy(unsafe.Slice((*uint16)(unsafe.Pointer(ptr)), len(utf16)), utf16)
-	procGlobalUnlock.Call(handle)
-
-	ok, _, err := procOpenClipboard.Call(0)
-	if ok == 0 {
-		procGlobalFree.Call(handle)
-		return errors.New("open clipboard fail: " + err.Error())
-	}
-	defer procCloseClipboard.Call()
-	procEmptyClipboard.Call()
-	if r, _, _ := procSetClipboardData.Call(cfUnicodeText, handle); r == 0 {
-		procGlobalFree.Call(handle)
-		return errors.New("set clipboard data fail")
+	written, _, err := procSendInput.Call(uintptr(len(inputs)), uintptr(unsafe.Pointer(&inputs[0])), unsafe.Sizeof(inputs[0]))
+	if written != uintptr(len(inputs)) {
+		procSendInput.Call(2, uintptr(unsafe.Pointer(&inputs[2])), unsafe.Sizeof(inputs[0]))
+		return fmt.Errorf("SendInput copied %d/%d events: %v", written, len(inputs), err)
 	}
 	return nil
 }
 
+var selectionMu sync.Mutex
+
 // SelectedText 取当前选中文本（对应 capture_selected_text）
-// 流程：记序列号 → 发 Ctrl+C → 轮询剪贴板变化 → 读出文本 → 还原原剪贴板
-//
-// 剪贴板还原是原版承诺的行为（注释里写了"还原原剪贴板"），但原实现只把 before
-// 用来判空、从不写回，用户每划一次词就永久丢掉自己剪贴板里的东西。这里真的还原。
+// 不能完整快照的格式在模拟复制前拒绝；恢复不会覆盖后续用户复制。
 func SelectedText(wait time.Duration) (string, error) {
-	before, _ := ReadClipboard()
-	seq := ClipboardSeq()
-	SendCtrlC()
+	if !selectionMu.TryLock() {
+		return "", errors.New("划词取词正在进行中")
+	}
+	defer selectionMu.Unlock()
+	var before clipboardSnapshot
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+	if err := copyWhenReleased(ctx, func() bool {
+		ctrl, alt, shift := ModifiersDown()
+		left, _, _ := procGetAsyncKeyState.Call(0x5B)
+		right, _, _ := procGetAsyncKeyState.Call(0x5C)
+		return ctrl || alt || shift || int16(left) < 0 || int16(right) < 0
+	}, func() error {
+		var err error
+		before, err = snapshotClipboard()
+		if err != nil {
+			return err
+		}
+		return sendCopyInput()
+	}); err != nil {
+		return "", err
+	}
 
 	grabbed := ""
+	var observedSequence uint32
 	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
 		time.Sleep(30 * time.Millisecond)
-		if ClipboardSeq() == seq {
+		if ClipboardSeq() == before.sequence {
 			continue
 		}
-		text, err := ReadClipboard()
+		text, sequence, err := readClipboardTextWithSequence()
+		if sequence == 0 || sequence == before.sequence {
+			continue
+		}
+		observedSequence = sequence
 		if err != nil {
 			continue
 		}
@@ -164,15 +163,8 @@ func SelectedText(wait time.Duration) (string, error) {
 			break
 		}
 	}
-	if grabbed == "" {
-		// 超时后尝试直接读一次
-		if text, err := ReadClipboard(); err == nil && text != "" && text != before {
-			grabbed = text
-		}
-	}
-	// 无论成败都把用户原来的剪贴板内容写回去
-	if before != "" {
-		if err := WriteClipboard(before); err != nil {
+	if observedSequence != 0 {
+		if err := writeClipboardFormats(before.items, &observedSequence); err != nil && !errors.Is(err, errClipboardChanged) {
 			logx.Warn("clipboard restore fail: %v", err)
 		}
 	}

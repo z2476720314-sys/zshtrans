@@ -1,9 +1,10 @@
 {
   "name": "zshtrans-ui",
   "private": true,
-  "version": "3.0.0",
+  "version": "3.4.0",
   "type": "module",
   "scripts": {
+    "test": "node --test test/*.test.mjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview"

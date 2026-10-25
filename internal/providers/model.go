@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -114,6 +115,7 @@ func NormalizeModel(m config.Model) config.Model {
 		Reasoning:       reasoning,
 		ThinkingParam:   tp,
 		ThinkingBudget:  m.ThinkingBudget,
+		OutputLimit:     max(0, m.OutputLimit),
 		Temperature:     temp,
 		ContextWindow:   m.ContextWindow,
 		MaxOutputTokens: m.MaxOutputTokens,
@@ -333,16 +335,25 @@ func ThinkingFields(p config.Provider, m config.Model) map[string]any {
 }
 
 // GenerationLimit 输出上限
-func GenerationLimit(m config.Model) int {
-	if m.ThinkingBudget > 0 {
-		return m.ThinkingBudget
+func GenerationLimit(m config.Model) (int, error) {
+	if m.MaxOutputTokens > 0 && m.OutputLimit > m.MaxOutputTokens {
+		return 0, fmt.Errorf("请求最大输出 %d 超过模型输出上限 %d", m.OutputLimit, m.MaxOutputTokens)
 	}
-	return DefaultMaxTokens
+	if m.OutputLimit > 0 {
+		return m.OutputLimit, nil
+	}
+	if m.MaxOutputTokens > 0 {
+		return min(DefaultMaxTokens, m.MaxOutputTokens), nil
+	}
+	return DefaultMaxTokens, nil
 }
 
 // BuildChatPayload 组请求体（translate.py:425）
-func BuildChatPayload(p config.Provider, m config.Model, system, user string) map[string]any {
-	limit := GenerationLimit(m)
+func BuildChatPayload(p config.Provider, m config.Model, system, user string) (map[string]any, error) {
+	limit, err := GenerationLimit(m)
+	if err != nil {
+		return nil, err
+	}
 	body := map[string]any{"model": m.ID}
 	switch ProtocolOf(p) {
 	case "anthropic-messages":
@@ -370,5 +381,5 @@ func BuildChatPayload(p config.Provider, m config.Model, system, user string) ma
 	for k, v := range ThinkingFields(p, m) {
 		body[k] = v
 	}
-	return body
+	return body, nil
 }

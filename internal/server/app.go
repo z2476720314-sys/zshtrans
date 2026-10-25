@@ -1,6 +1,10 @@
 package server
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"strings"
 	"sync"
@@ -55,11 +59,12 @@ func (k keysAdapter) Has(key string) bool {
 
 // App 运行时聚合：配置 + 引擎 + 密钥 + 桌面窗口
 type App struct {
-	mu    sync.RWMutex
-	store *config.Store
-	eng   *engine.Engine
-	bus   *bus
-	win   Windower
+	mu       sync.RWMutex
+	store    *config.Store
+	eng      *engine.Engine
+	bus      *bus
+	win      Windower
+	onResult func(Result)
 	// applyMu 串行化「读配置 → 改 → 落盘 → 重建引擎」整段。
 	// 原来 /api/settings 全程无锁读-改-写，两个并发保存会互相覆盖对方的字段。
 	applyMu sync.Mutex
@@ -157,6 +162,7 @@ func (a *App) applyLocked(cfg config.Config) error {
 	}
 	a.store.Set(cfg)
 	ocr.ResetBaiduToken()
+	ocr.ResetCache()
 	a.rebuild()
 	return nil
 }
@@ -182,8 +188,8 @@ func buildPool(cfg config.Config) []*providers.Provider {
 			credential := key
 			pool = append(pool, &providers.Provider{
 				Name: name,
-				Fn: func(text, src, tgt string) (string, error) {
-					return providers.TranslateWith(p, m, credential, text, src, tgt)
+				Fn: func(ctx context.Context, text, src, tgt string) (string, error) {
+					return providers.TranslateWithContext(ctx, p, m, credential, text, src, tgt)
 				},
 			})
 		}
@@ -221,10 +227,17 @@ func (a *App) ocrKeys(cfg config.Config) ocr.Keys {
 				continue
 			}
 			p, m, credential := p, m, key
-			out.Vision = func(b64 string) (string, error) {
-				return providers.VisionOCR(p, m, credential, b64)
+			out.VisionContext = func(ctx context.Context, b64 string) (string, error) {
+				return providers.VisionOCRContext(ctx, p, m, credential, b64)
 			}
 			out.VisionTag = tag
+			scope, _ := json.Marshal(struct {
+				Provider config.Provider
+				Model    config.Model
+				Key      string
+			}{p, m, credential})
+			digest := sha256.Sum256(scope)
+			out.VisionScope = hex.EncodeToString(digest[:])
 			return out
 		}
 	}

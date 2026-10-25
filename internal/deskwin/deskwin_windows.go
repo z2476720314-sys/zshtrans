@@ -43,13 +43,15 @@ type Settings struct {
 
 // Win 一个 WebView2 窗口
 type Win struct {
-	wv      webview2.WebView
-	hwnd    uintptr
-	mu      sync.Mutex
-	shown   atomic.Bool
-	hidden  atomic.Bool
-	closing atomic.Bool
-	err     error
+	wv             webview2.WebView
+	hwnd           uintptr
+	mu             sync.Mutex
+	shown          atomic.Bool
+	hidden         atomic.Bool
+	closing        atomic.Bool
+	previousWindow atomic.Uintptr
+	previousPID    atomic.Uint32
+	err            error
 }
 
 // ErrUnavailable 表示系统缺少 WebView2 运行时（老 Win10/精简系统）
@@ -65,6 +67,9 @@ var (
 	procCallWindowProcW     = user32.NewProc("CallWindowProcW")
 	procShowWindow          = user32.NewProc("ShowWindow")
 	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
+	procGetForegroundWindow = user32.NewProc("GetForegroundWindow")
+	procGetWindowProcess    = user32.NewProc("GetWindowThreadProcessId")
+	procIsWindow            = user32.NewProc("IsWindow")
 	procIsIconic            = user32.NewProc("IsIconic")
 	procIsWindowVisible     = user32.NewProc("IsWindowVisible")
 	procPostMessageW        = user32.NewProc("PostMessageW")
@@ -84,25 +89,35 @@ const (
 
 // 窗口过程子类化状态
 var (
-	subclassMu  sync.Mutex
-	origProcs   = map[uintptr]uintptr{}
-	closeHooks  = map[uintptr]func(){}
-	wndProcOnce sync.Map
+	subclassMu    sync.Mutex
+	origProcs     = map[uintptr]uintptr{}
+	closeHooks    = map[uintptr]func(){}
+	activateHooks = map[uintptr]func(uintptr){}
+	wndProcOnce   sync.Map
 )
 
 // subclass 把窗口过程换成自己的，拦截 WM_CLOSE 走 onClose，其余转发原 proc。
-func subclass(hwnd uintptr, onClose func()) {
+func subclass(hwnd uintptr, onClose func(), onActivate func(uintptr)) {
 	if hwnd == 0 {
 		return
 	}
 	subclassMu.Lock()
 	closeHooks[hwnd] = onClose
+	activateHooks[hwnd] = onActivate
 	subclassMu.Unlock()
 
 	if _, loaded := wndProcOnce.LoadOrStore(hwnd, struct{}{}); loaded {
 		return
 	}
 	cb := windows.NewCallback(func(h, msg, wp, lp uintptr) uintptr {
+		if msg == 0x0006 && wp&0xffff != 0 && lp != 0 {
+			subclassMu.Lock()
+			fn := activateHooks[h]
+			subclassMu.Unlock()
+			if fn != nil {
+				fn(lp)
+			}
+		}
 		if msg == wmClose {
 			subclassMu.Lock()
 			fn := closeHooks[h]
@@ -131,6 +146,7 @@ func subclass(hwnd uintptr, onClose func()) {
 		wndProcOnce.Delete(hwnd)
 		subclassMu.Lock()
 		delete(closeHooks, hwnd)
+		delete(activateHooks, hwnd)
 		subclassMu.Unlock()
 		// 装不上窗口过程不影响显示，只是点 X 会走系统默认关闭（销毁窗口）
 		_ = callErr
@@ -169,6 +185,7 @@ func defaultDataPath() string {
 // Open 同步创建窗口（必须在主 goroutine 调用）。创建失败返回 ErrUnavailable，
 // 调用方应回退到浏览器模式。返回后需由同一 goroutine 调 Run()。
 func Open(s Settings) (w *Win, err error) {
+	previous, _, _ := procGetForegroundWindow.Call()
 	// go-webview2 在 controller 回调为 nil 时直接解引用崩溃（chromium.go:190）。
 	// 这里兜底，把它变成可回退的错误，而不是让整个程序消失。
 	defer func() {
@@ -209,12 +226,13 @@ func Open(s Settings) (w *Win, err error) {
 	}
 
 	w = &Win{wv: wv}
+	w.rememberPrevious(previous)
 	if p := wv.Window(); p != nil {
 		w.hwnd = uintptr(p)
 	}
 
 	// 点 X = 隐藏到托盘（不销毁窗口，页面状态保留）
-	subclass(w.hwnd, func() { w.Hide() })
+	subclass(w.hwnd, func() { w.Hide() }, w.rememberPrevious)
 
 	if s.URL != "" {
 		wv.Navigate(s.URL)
@@ -300,6 +318,54 @@ func (w *Win) visible() bool {
 	}
 	ok, _, _ := procIsWindowVisible.Call(w.hwnd)
 	return ok != 0
+}
+
+// Visible excludes minimized windows so capture restores only a visible main window.
+func (w *Win) Visible() bool {
+	if !w.visible() {
+		return false
+	}
+	iconic, _, _ := procIsIconic.Call(w.hwnd)
+	return iconic == 0
+}
+
+// rememberPrevious excludes this application's own popup and main window.
+func (w *Win) rememberPrevious(previous uintptr) {
+	var pid uint32
+	procGetWindowProcess.Call(previous, uintptr(unsafe.Pointer(&pid)))
+	if previous != 0 && pid != 0 && pid != uint32(os.Getpid()) {
+		w.previousPID.Store(pid)
+		w.previousWindow.Store(previous)
+	}
+}
+
+// PrepareSelection only succeeds after the remembered external window has focus.
+func (w *Win) PrepareSelection() bool {
+	previous := w.previousWindow.Load()
+	if previous == 0 {
+		return false
+	}
+	valid, _, _ := procIsWindow.Call(previous)
+	var pid uint32
+	procGetWindowProcess.Call(previous, uintptr(unsafe.Pointer(&pid)))
+	if valid == 0 || pid == 0 || pid != w.previousPID.Load() || pid == uint32(os.Getpid()) {
+		return false
+	}
+	wasVisible := w.Visible()
+	w.Hide()
+	procSetForegroundWindow.Call(previous)
+	foreground, _, _ := procGetForegroundWindow.Call()
+	if foreground != previous {
+		if wasVisible {
+			w.Show()
+		}
+		return false
+	}
+	return true
+}
+
+func ShowError(message string) {
+	user32.NewProc("MessageBoxW").Call(0, uintptr(unsafe.Pointer(resultUTF16(message))), uintptr(unsafe.Pointer(resultUTF16("ZSH TRANS"))), 0x10)
 }
 
 // Close 真正销毁窗口，Run 随之返回。用于退出程序。

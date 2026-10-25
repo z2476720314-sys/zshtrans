@@ -12,7 +12,10 @@ export default defineConfig({
   server: {
     port: 5273,
     proxy: {
-      '/api': 'http://127.0.0.1:8765',
+      '/api': {
+        target: process.env.ZSHTRANS_DEV_BACKEND || 'http://127.0.0.1:8765',
+        changeOrigin: false,
+      },
     },
   },
 })

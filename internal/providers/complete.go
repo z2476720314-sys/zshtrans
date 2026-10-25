@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +14,10 @@ import (
 func ExtractText(raw []byte) (string, error) {
 	var payload map[string]any
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		return "", errors.New("bad response: " + truncate(string(raw), 160))
+		return CollectStream(strings.Split(string(raw), "\n"))
+	}
+	if err := CheckOutputLimit(payload); err != nil {
+		return "", err
 	}
 	var out string
 	if s, ok := payload["choices"]; ok {
@@ -93,17 +97,46 @@ func typedText(v any, kinds ...string) string {
 
 // CheckOutputLimit 输出被截断时给出明确错误（translate.py:522）
 func CheckOutputLimit(payload map[string]any) error {
-	if reason, ok := payload["finish_reason"].(string); ok && reason == "length" {
-		return errors.New("output truncated by limit")
+	if payload["error"] != nil || payload["status"] == "failed" {
+		return errors.New("model request failed")
 	}
-	if status, ok := payload["status"].(string); ok && status == "incomplete" {
-		return errors.New("output incomplete")
+	if payload["status"] == "incomplete" {
+		return errors.New("模型输出未完成，请提高最大输出或缩短原文")
+	}
+	for _, key := range []string{"finish_reason", "stop_reason"} {
+		switch payload[key] {
+		case "length", "max_tokens", "model_context_window_exceeded", "content_filter":
+			return errors.New("模型输出被截断，请提高最大输出或缩短原文")
+		}
+	}
+	for _, key := range []string{"response", "delta", "incomplete_details"} {
+		if nested, ok := payload[key].(map[string]any); ok {
+			if nested["reason"] == "max_output_tokens" {
+				return errors.New("模型输出被截断，请提高最大输出或缩短原文")
+			}
+			if err := CheckOutputLimit(nested); err != nil {
+				return err
+			}
+		}
+	}
+	if choices, ok := payload["choices"].([]any); ok {
+		for _, choice := range choices {
+			if item, ok := choice.(map[string]any); ok {
+				if err := CheckOutputLimit(item); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	return nil
 }
 
 // StreamDelta 流式增量（translate.py:559）
 func StreamDelta(chunk map[string]any) string {
+	if chunk["type"] == "response.output_text.delta" {
+		text, _ := chunk["delta"].(string)
+		return text
+	}
 	if choices, ok := chunk["choices"].([]any); ok && len(choices) > 0 {
 		if first, ok := choices[0].(map[string]any); ok {
 			if delta, ok := first["delta"].(map[string]any); ok {
@@ -132,33 +165,66 @@ func StreamDelta(chunk map[string]any) string {
 }
 
 // CollectStream 解析 SSE 行并拼接（translate.py:587）
-func CollectStream(lines []string) string {
+func CollectStream(lines []string) (string, error) {
 	var sb strings.Builder
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, ":") {
+	var data []string
+	complete := false
+	for _, line := range append(lines, "") {
+		line = strings.TrimSuffix(line, "\r")
+		if strings.HasPrefix(line, "data:") {
+			data = append(data, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 			continue
 		}
-		if strings.HasPrefix(line, "data:") {
-			line = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if line != "" || len(data) == 0 {
+			continue
 		}
-		if line == "[DONE]" {
+		payload := strings.Join(data, "\n")
+		data = nil
+		if payload == "[DONE]" {
+			complete = true
 			break
 		}
 		var chunk map[string]any
-		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
-			continue
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			return "", errors.New("invalid model stream")
+		}
+		if err := CheckOutputLimit(chunk); err != nil {
+			return "", err
 		}
 		sb.WriteString(StreamDelta(chunk))
+		if chunk["type"] == "message_stop" || chunk["type"] == "response.completed" {
+			complete = true
+		}
+		if choices, ok := chunk["choices"].([]any); ok {
+			for _, choice := range choices {
+				if item, ok := choice.(map[string]any); ok && item["finish_reason"] == "stop" {
+					complete = true
+				}
+			}
+		}
 	}
-	return sb.String()
+	if !complete {
+		return "", errors.New("模型流式响应中途结束，译文不完整")
+	}
+	text := strings.TrimSpace(sb.String())
+	if text == "" {
+		return "", errors.New("empty result")
+	}
+	return text, nil
 }
 
 // TranslateWith 用某个提供方+模型翻译一次（translate.py:625 make_translator）
 func TranslateWith(p config.Provider, m config.Model, key, text, src, tgt string) (string, error) {
+	return TranslateWithContext(context.Background(), p, m, key, text, src, tgt)
+}
+
+func TranslateWithContext(ctx context.Context, p config.Provider, m config.Model, key, text, src, tgt string) (string, error) {
 	prompt := BuildPrompt(src, tgt)
-	body := BuildChatPayload(p, m, prompt, text)
-	raw, err := PostChat(p, key, body)
+	body, err := BuildChatPayload(p, m, prompt, text)
+	if err != nil {
+		return "", err
+	}
+	raw, err := PostChatContext(ctx, p, key, body)
 	if err != nil {
 		return "", err
 	}
@@ -171,18 +237,30 @@ func TranslateWith(p config.Provider, m config.Model, key, text, src, tgt string
 
 // PostChat 发请求返回原始响应
 func PostChat(p config.Provider, key string, body map[string]any) ([]byte, error) {
+	return PostChatContext(context.Background(), p, key, body)
+}
+
+func PostChatContext(ctx context.Context, p config.Provider, key string, body map[string]any) ([]byte, error) {
+	body["stream"] = p.Stream
 	url := ChatURL(p)
 	hdr := AuthHeaders(p, key)
 	timeout := p.Timeout
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	return postRaw(url, body, hdr, timeout)
+	return postRaw(ctx, url, body, hdr, timeout)
 }
 
 // VisionOCR 用视觉模型识别图片（translate.py:674 make_vision_ocr）
 func VisionOCR(p config.Provider, m config.Model, key, b64 string) (string, error) {
-	limit := GenerationLimit(m)
+	return VisionOCRContext(context.Background(), p, m, key, b64)
+}
+
+func VisionOCRContext(ctx context.Context, p config.Provider, m config.Model, key, b64 string) (string, error) {
+	limit, err := GenerationLimit(m)
+	if err != nil {
+		return "", err
+	}
 	var body map[string]any
 	switch ProtocolOf(p) {
 	case "anthropic-messages":
@@ -230,7 +308,7 @@ func VisionOCR(p config.Provider, m config.Model, key, b64 string) (string, erro
 			body[k] = v
 		}
 	}
-	raw, err := PostChat(p, key, body)
+	raw, err := PostChatContext(ctx, p, key, body)
 	if err != nil {
 		return "", err
 	}

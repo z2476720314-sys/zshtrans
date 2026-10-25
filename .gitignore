@@ -24,3 +24,6 @@ Desktop.ini
 # 备份/中间文件
 *.bak-*
 *.tsbuildinfo
+
+# 原生二进制随 Release 分发，构建前按固定摘要获取。
+/internal/capture/bundled/qq-runtime.zip

@@ -1,11 +1,42 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestCrossOriginRequestsNeverReachHandler(t *testing.T) {
+	for _, origin := range []string{"https://attacker.test", "http://192.168.0.10:8080", "http://localhost:5173", "null"} {
+		t.Run(origin, func(t *testing.T) {
+			called := false
+			h := withCORS(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+			r := httptest.NewRequest("POST", "http://127.0.0.1:8765/api/settings", strings.NewReader(`{"update_repo":"attacker/repo"}`))
+			r.Header.Set("Origin", origin)
+			r.Header.Set("Content-Type", "text/plain")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if called || w.Code != http.StatusForbidden {
+				t.Fatalf("cross-origin write reached handler=%v status=%d", called, w.Code)
+			}
+		})
+	}
+}
+
+func TestEventsRejectLANClients(t *testing.T) {
+	s := New(&App{bus: newBus()}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := httptest.NewRequest("GET", "http://192.168.0.129:8765/api/events", nil).WithContext(ctx)
+	r.RemoteAddr = "192.168.0.50:50000"
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("LAN client can subscribe to local captured text: status=%d", w.Code)
+	}
+}
 
 // TestGuardHostRejectsForeignHost 非 IP、非 localhost 的 Host 必须 403（DNS rebinding 防护，H3 回归）
 func TestGuardHostRejectsForeignHost(t *testing.T) {
@@ -56,20 +87,22 @@ func TestLoopbackOnly(t *testing.T) {
 	}
 }
 
-// TestAllowedOrigin 只有本机/私网来源才允许 CORS 回显，公网来源一律拒绝（H3 回归）
+// 本机地址也必须匹配当前应用端口；其它本机网页不能管理本应用。
 func TestAllowedOrigin(t *testing.T) {
+	r := httptest.NewRequest("GET", "http://127.0.0.1:8788/", nil)
 	allowed := []string{
-		"http://localhost:5173",
 		"http://127.0.0.1:8788",
-		"http://192.168.0.10:8080",
-		"https://10.0.0.5",
 	}
 	for _, o := range allowed {
-		if !allowedOrigin(o) {
+		if !allowedOrigin(o, r) {
 			t.Errorf("origin %q should be allowed", o)
 		}
 	}
 	denied := []string{
+		"http://localhost:5173",
+		"http://192.168.0.10:8080",
+		"https://10.0.0.5",
+		"http://127.0.0.1:8788/other",
 		"http://evil.example.com",
 		"https://attacker.test:443",
 		"file://local",
@@ -77,7 +110,7 @@ func TestAllowedOrigin(t *testing.T) {
 		"",
 	}
 	for _, o := range denied {
-		if allowedOrigin(o) {
+		if allowedOrigin(o, r) {
 			t.Errorf("origin %q should be denied", o)
 		}
 	}
@@ -91,10 +124,10 @@ func TestWithCORSNoWildcard(t *testing.T) {
 
 	// 本机来源：回显该来源
 	r := httptest.NewRequest("GET", "http://127.0.0.1:8788/api/status", nil)
-	r.Header.Set("Origin", "http://localhost:5173")
+	r.Header.Set("Origin", "http://127.0.0.1:8788")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:5173" {
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "http://127.0.0.1:8788" {
 		t.Errorf("allow-origin = %q, want echoed origin", got)
 	}
 

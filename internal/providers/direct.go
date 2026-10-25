@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
@@ -13,7 +14,7 @@ import (
 )
 
 // Func 翻译函数签名（对应 pyc 各 t_* 函数）
-type Func func(text, src, tgt string) (string, error)
+type Func func(ctx context.Context, text, src, tgt string) (string, error)
 
 // Keys 密钥读取器，隔离 config 依赖
 type Keys interface {
@@ -41,7 +42,7 @@ var httpClient = newHTTPClient(8)
 
 const googleURL = "https://translate.googleapis.com/translate_a/single"
 
-func tGoogle(text, src, tgt string) (string, error) {
+func tGoogle(ctx context.Context, text, src, tgt string) (string, error) {
 	q := url.Values{}
 	q.Set("client", "gtx")
 	q.Set("sl", src)
@@ -49,7 +50,7 @@ func tGoogle(text, src, tgt string) (string, error) {
 	q.Set("dt", "t")
 	q.Set("q", text)
 	var resp [][][]any
-	if err := getJSON(googleURL+"?"+q.Encode(), nil, &resp); err != nil {
+	if err := getJSON(ctx, googleURL+"?"+q.Encode(), nil, &resp); err != nil {
 		return "", err
 	}
 	var sb strings.Builder
@@ -76,14 +77,14 @@ var lingvaMirrors = []string{
 	"https://lingva.ml",
 }
 
-func tLingva(text, src, tgt string) (string, error) {
+func tLingva(ctx context.Context, text, src, tgt string) (string, error) {
 	var errs []string
 	for _, mirror := range lingvaMirrors {
 		u := fmt.Sprintf("%s/api/v1/%s/%s/%s?safe=0", mirror, src, tgt, url.PathEscape(text))
 		var resp struct {
 			Translation string `json:"translation"`
 		}
-		if err := getJSON(u, nil, &resp); err != nil {
+		if err := getJSON(ctx, u, nil, &resp); err != nil {
 			errs = append(errs, err.Error())
 			continue
 		}
@@ -102,7 +103,7 @@ const myMemoryURL = "https://api.mymemory.translated.net/get"
 // sentenceBreaks 句末标点集合（Go RE2 不支持 lookbehind，改为手工扫描）
 const sentenceBreaks = ".!?。！？\n"
 
-func tMyMemory(text, src, tgt string) (string, error) {
+func tMyMemory(ctx context.Context, text, src, tgt string) (string, error) {
 	parts := splitSentences(text)
 	if len(parts) == 0 {
 		parts = []string{text}
@@ -122,7 +123,7 @@ func tMyMemory(text, src, tgt string) (string, error) {
 		go func(i int, part string) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			out, err := myMemoryOne(part, src, tgt)
+			out, err := myMemoryOne(ctx, part, src, tgt)
 			ch <- res{idx: i, out: out, err: err}
 		}(i, part)
 	}
@@ -144,7 +145,7 @@ func tMyMemory(text, src, tgt string) (string, error) {
 	return strings.Join(outs, ""), nil
 }
 
-func myMemoryOne(text, src, tgt string) (string, error) {
+func myMemoryOne(ctx context.Context, text, src, tgt string) (string, error) {
 	// MyMemory 不接受 langpair 里的 auto（会返回 "'AUTO' IS AN INVALID SOURCE
 	// LANGUAGE"），必须先按文字内容判出具体源语言，否则 auto 场景必然失败。
 	if src == "auto" {
@@ -159,7 +160,7 @@ func myMemoryOne(text, src, tgt string) (string, error) {
 		} `json:"responseData"`
 		ResponseStatus any `json:"responseStatus"`
 	}
-	if err := getJSON(myMemoryURL+"?"+q.Encode(), nil, &resp); err != nil {
+	if err := getJSON(ctx, myMemoryURL+"?"+q.Encode(), nil, &resp); err != nil {
 		return "", err
 	}
 	status := fmt.Sprint(resp.ResponseStatus)
@@ -212,7 +213,7 @@ func deeplTarget(tgt string) string {
 	}
 }
 
-func tDeepL(text, src, tgt string, keys Keys) (string, error) {
+func tDeepL(ctx context.Context, text, src, tgt string, keys Keys) (string, error) {
 	form := url.Values{}
 	form.Set("text", text)
 	form.Set("target_lang", deeplTarget(tgt))
@@ -224,8 +225,9 @@ func tDeepL(text, src, tgt string, keys Keys) (string, error) {
 			Text string `json:"text"`
 		} `json:"translations"`
 	}
-	hdr := map[string]string{"Authorization": "DeepL-Auth-Key " + keys.DeepL()}
-	if err := postFormJSON(deepLURL, form, hdr, &resp); err != nil {
+	hdr := map[string]string{}
+	hdr["Authorization"] = "DeepL-Auth-Key " + keys.DeepL()
+	if err := postFormJSON(ctx, deepLURL, form, hdr, &resp); err != nil {
 		return "", err
 	}
 	var sb strings.Builder
@@ -256,7 +258,7 @@ func baiduCode(id string) string {
 	return id
 }
 
-func tBaidu(text, src, tgt string, keys Keys) (string, error) {
+func tBaidu(ctx context.Context, text, src, tgt string, keys Keys) (string, error) {
 	appID, key := keys.BaiduAppID(), keys.BaiduKey()
 	if appID == "" || key == "" {
 		return "", errors.New("baidu key not set")
@@ -277,7 +279,7 @@ func tBaidu(text, src, tgt string, keys Keys) (string, error) {
 		ErrorCode any    `json:"error_code"`
 		ErrorMsg  string `json:"error_msg"`
 	}
-	if err := getJSON(baiduURL+"?"+q.Encode(), nil, &resp); err != nil {
+	if err := getJSON(ctx, baiduURL+"?"+q.Encode(), nil, &resp); err != nil {
 		return "", err
 	}
 	if code := fmt.Sprint(resp.ErrorCode); code != "" && code != "<nil>" && code != "0" {
@@ -298,7 +300,7 @@ func tBaidu(text, src, tgt string, keys Keys) (string, error) {
 
 const niuTransURL = "https://api.niutrans.com/NiuTransServer/translation"
 
-func tNiuTrans(text, src, tgt string, keys Keys) (string, error) {
+func tNiuTrans(ctx context.Context, text, src, tgt string, keys Keys) (string, error) {
 	form := url.Values{}
 	form.Set("from", src)
 	form.Set("to", tgt)
@@ -308,7 +310,7 @@ func tNiuTrans(text, src, tgt string, keys Keys) (string, error) {
 		TgtText  string `json:"tgt_text"`
 		ErrorMsg string `json:"error_msg"`
 	}
-	if err := postFormJSON(niuTransURL, form, nil, &resp); err != nil {
+	if err := postFormJSON(ctx, niuTransURL, form, nil, &resp); err != nil {
 		return "", err
 	}
 	if resp.ErrorMsg != "" {
@@ -324,41 +326,37 @@ func tNiuTrans(text, src, tgt string, keys Keys) (string, error) {
 
 const agnesURL = "https://apihub.agnes-ai.com/v1/chat/completions"
 
-func tAgnes(text, src, tgt string, keys Keys) (string, error) {
+func tAgnes(ctx context.Context, text, src, tgt string, keys Keys) (string, error) {
 	key := keys.Agnes()
 	if key == "" {
 		return "", errors.New("Agnes API key empty (set it in settings)")
 	}
-	return chatTranslate(agnesURL, "agnes-2.5-flash", key, text, src, tgt, nil)
+	return chatTranslate(ctx, agnesURL, "agnes-2.5-flash", key, text, src, tgt, nil)
 }
 
 // ---------- 百炼 GLM-5.2 / Qwen3.7-Max ----------
 
 const qwenURL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 
-func tQwenMax(text, src, tgt string, keys Keys) (string, error) {
+func tQwenMax(ctx context.Context, text, src, tgt string, keys Keys) (string, error) {
 	key := keys.Qwen()
 	if key == "" {
 		return "", errors.New("Qwen API key empty (set it in settings)")
 	}
-	return chatTranslate(qwenURL, "glm-5.2", key, text, src, tgt, map[string]any{"enable_thinking": false})
+	return chatTranslate(ctx, qwenURL, "glm-5.2", key, text, src, tgt, map[string]any{"enable_thinking": false})
 }
 
-func tQwenMaxSnap(text, src, tgt string, keys Keys) (string, error) {
+func tQwenMaxSnap(ctx context.Context, text, src, tgt string, keys Keys) (string, error) {
 	key := keys.Qwen()
 	if key == "" {
 		return "", errors.New("Qwen API key empty (set it in settings)")
 	}
-	return chatTranslate(qwenURL, "qwen3.7-max-2026-06-08", key, text, src, tgt, map[string]any{"enable_thinking": false})
+	return chatTranslate(ctx, qwenURL, "qwen3.7-max-2026-06-08", key, text, src, tgt, map[string]any{"enable_thinking": false})
 }
 
 // chatTranslate 通用 OpenAI 兼容翻译调用
-func chatTranslate(endpoint, model, key, text, src, tgt string, extra map[string]any) (string, error) {
-	sys := "你是一个专业翻译引擎。请将用户提供的文本"
-	if src != "auto" {
-		sys += fmt.Sprintf("（源语言：%s）", src)
-	}
-	sys += fmt.Sprintf("翻译为%s。只输出译文，不要解释或添加额外内容。", tgt)
+func chatTranslate(ctx context.Context, endpoint, model, key, text, src, tgt string, extra map[string]any) (string, error) {
+	sys := BuildPrompt(src, tgt)
 
 	body := map[string]any{
 		"model": model,
@@ -371,23 +369,14 @@ func chatTranslate(endpoint, model, key, text, src, tgt string, extra map[string
 	for k, v := range extra {
 		body[k] = v
 	}
-	var resp struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
 	hdr := map[string]string{"Authorization": "Bearer " + key}
-	if err := postJSON(endpoint, body, hdr, &resp); err != nil {
+	raw, err := postRaw(ctx, endpoint, body, hdr, 8)
+	if err != nil {
 		return "", err
 	}
-	if len(resp.Choices) == 0 {
-		return "", errors.New("empty result")
+	out, err := ExtractText(raw)
+	if err != nil {
+		return "", err
 	}
-	out := strings.TrimSpace(resp.Choices[0].Message.Content)
-	if out == "" {
-		return "", errors.New("empty result")
-	}
-	return out, nil
+	return CleanOutput(out, tgt)
 }

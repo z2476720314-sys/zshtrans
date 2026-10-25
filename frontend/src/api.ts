@@ -13,6 +13,9 @@ export type Status = {
   default: string
   cache: number
   lan: string
+  desktop: boolean
+  update_check: boolean
+  local: boolean
 }
 
 export type TranslateResult = {
@@ -23,6 +26,12 @@ export type TranslateResult = {
   tgt: string
 }
 
+export type CaptureResult = TranslateResult & {
+  source: string
+  engine?: string
+  action?: 'translate' | 'ocr' | 'complete' | 'cancel'
+}
+
 export type Model = {
   id: string
   label?: string
@@ -31,6 +40,7 @@ export type Model = {
   thinking_param?: string
   thinking_budget?: number
   temperature: number | null
+  output_limit?: number
   /** 以下为模型目录返回的元数据，缺省表示未知 */
   context_window?: number
   max_output_tokens?: number
@@ -111,7 +121,7 @@ export type SelfCheck = {
   ui_toolkit: string
   phrases_count: number
   phrases_sha256: string
-  font_glyphs_ok: boolean
+  font_glyphs_ok: boolean | null
   providers: number
   usable: number
   cache: number
@@ -172,10 +182,11 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   status: () => call<Status>('/api/status'),
-  translate: (text: string, src: string, tgt: string) =>
+  translate: (text: string, src: string, tgt: string, signal?: AbortSignal) =>
     call<TranslateResult>('/api/translate', {
       method: 'POST',
       body: JSON.stringify({ text, src, tgt }),
+      signal,
     }),
   config: () => call<Config>('/api/config'),
   saveSettings: (body: Record<string, unknown>) =>
@@ -209,23 +220,25 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ image }),
     }),
-  capture: (region?: { x: number; y: number; w: number; h: number }) =>
-    call<{ source: string; text: string; provider: string; ms: number; engine?: string }>(
+  capture: (region?: { x: number; y: number; w: number; h: number }, signal?: AbortSignal) =>
+    call<CaptureResult>(
       '/api/capture',
       {
         method: 'POST',
         body: JSON.stringify(region ?? {}),
+        signal,
       },
     ),
-  selection: () =>
-    call<{ source: string; text: string; provider: string; ms: number }>('/api/selection', {
+  selection: (signal?: AbortSignal) =>
+    call<CaptureResult>('/api/selection', {
       method: 'POST',
       body: '{}',
+      signal,
     }),
   selfcheck: () => call<SelfCheck>('/api/selfcheck'),
   updateCheck: (force = false) =>
     call<UpdateInfo>(`/api/update/check${force ? '?force=1' : ''}`),
-  updateApply: (action: 'download' | 'install' | 'status', skip = '') =>
+  updateApply: (action: 'download' | 'install' | 'status' | 'cancel', skip = '') =>
     call<{ ok: boolean; state?: string; skipped?: string }>('/api/update/apply', {
       method: 'POST',
       body: JSON.stringify({ action, skip }),

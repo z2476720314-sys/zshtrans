@@ -32,13 +32,14 @@ import {
   type Provider,
 } from '../api'
 
-const TABS = ['模型提供方', '截图与 OCR', '快捷键', '其他翻译接口'] as const
+const TABS = ['模型提供方', '截图与 OCR', '快捷键', '其他翻译接口', '更新'] as const
 
 const TAB_HINTS: Record<(typeof TABS)[number], string> = {
   模型提供方: '密钥只写入本地，留空保留已保存值；所有修改在保存后生效。',
   '截图与 OCR': '从已启用并支持图片输入的模型中选择；保存时校验密钥。',
   快捷键: '组合键格式：ctrl+alt+t。系统占用冲突会在保存时显示。',
   其他翻译接口: '不回显已保存的密钥；留空保持不变。',
+  更新: '自动检查只会提示新版本，由你决定是否下载、安装和重启。',
 }
 
 /** 其他接口密钥 8 项（对应 translate.py OTHER_KEYS） */
@@ -96,7 +97,7 @@ export default function Settings({ onSaved }: Props) {
     const rows: { value: string; label: string }[] = []
     for (const p of providers) {
       if (!p.enabled) continue
-      const hasKey = (cfg?.api_keys?.[p.key_ref] ?? '') !== '' || keys[p.key_ref] !== undefined
+      const hasKey = Boolean(cfg?.api_keys?.[p.key_ref] || keys[p.key_ref]?.trim())
       if (!hasKey && !p.key_env) continue
       for (const m of p.models ?? []) {
         rows.push({ value: `${p.id}:${m.id}`, label: `${p.label} · ${m.label || m.id}` })
@@ -110,7 +111,7 @@ export default function Settings({ onSaved }: Props) {
     const rows: { value: string; label: string }[] = []
     for (const p of providers) {
       if (!p.enabled) continue
-      const hasKey = (cfg?.api_keys?.[p.key_ref] ?? '') !== '' || keys[p.key_ref] !== undefined
+      const hasKey = Boolean(cfg?.api_keys?.[p.key_ref] || keys[p.key_ref]?.trim())
       if (!hasKey && !p.key_env) continue
       for (const m of p.models ?? []) {
         if (!m.image) continue
@@ -171,49 +172,48 @@ export default function Settings({ onSaved }: Props) {
       }
       // 目录元数据只补未知项，不覆盖手工选择（与原 apply_model_metadata 一致）
       const catalogue = new Map(res.models.map((m) => [m.id, m]))
-      const rows = [...(p.models ?? [])]
-      const existing = new Set(rows.map((m) => m.id))
-      let added = 0
-      for (const [id, incoming] of catalogue) {
-        if (!existing.has(id)) {
-          rows.push({
-            id,
-            label: incoming.label || id,
-            image: incoming.image === true,
-            reasoning:
-              incoming.reasoning_levels?.includes(incoming.reasoning)
-                ? incoming.reasoning
-                : incoming.reasoning_levels?.[0] ?? 'off',
-            thinking_param: incoming.thinking_param,
-            thinking_budget: incoming.thinking_budget,
-            temperature: incoming.temperature ?? 0.3,
-            context_window: incoming.context_window,
-            max_output_tokens: incoming.max_output_tokens,
-            reasoning_levels: incoming.reasoning_levels,
-            thinking_types: incoming.thinking_types,
-            metadata_source: incoming.metadata_source ?? 'provider',
-          })
-          added += 1
-        } else {
-          const idx = rows.findIndex((m) => m.id === id)
-          const cur = rows[idx]
-          rows[idx] = {
-            ...cur,
-            image: incoming.image === true ? true : cur.image,
-            context_window: incoming.context_window || cur.context_window,
-            max_output_tokens: incoming.max_output_tokens || cur.max_output_tokens,
-            reasoning_levels: incoming.reasoning_levels?.length
-              ? incoming.reasoning_levels
-              : cur.reasoning_levels,
-            thinking_types: incoming.thinking_types ?? cur.thinking_types,
-            metadata_source: incoming.metadata_source ?? 'provider',
+      setProviders((current) => current.map((entry) => {
+        if (entry.id !== p.id) return entry
+        const rows = [...(entry.models ?? [])]
+        const existing = new Set(rows.map((m) => m.id))
+        for (const [id, incoming] of catalogue) {
+          if (!existing.has(id)) {
+            rows.push({
+              id,
+              label: incoming.label || id,
+              image: incoming.image === true,
+              reasoning:
+                incoming.reasoning_levels?.includes(incoming.reasoning)
+                  ? incoming.reasoning
+                  : incoming.reasoning_levels?.[0] ?? 'off',
+              thinking_param: incoming.thinking_param,
+              thinking_budget: incoming.thinking_budget,
+              temperature: incoming.temperature ?? 0.3,
+              context_window: incoming.context_window,
+              max_output_tokens: incoming.max_output_tokens,
+              reasoning_levels: incoming.reasoning_levels,
+              thinking_types: incoming.thinking_types,
+              metadata_source: incoming.metadata_source ?? 'provider',
+            })
+          } else {
+            const idx = rows.findIndex((m) => m.id === id)
+            const cur = rows[idx]
+            rows[idx] = {
+              ...cur,
+              image: incoming.image === true ? true : cur.image,
+              context_window: incoming.context_window || cur.context_window,
+              max_output_tokens: incoming.max_output_tokens || cur.max_output_tokens,
+              reasoning_levels: incoming.reasoning_levels?.length
+                ? incoming.reasoning_levels
+                : cur.reasoning_levels,
+              thinking_types: incoming.thinking_types ?? cur.thinking_types,
+              metadata_source: incoming.metadata_source ?? 'provider',
+            }
           }
         }
-      }
-      patch(p.id, { models: rows })
-      message.success(
-        `已获取 ${catalogue.size} 个模型；新增 ${added} 个，未返回的配置保留原值`,
-      )
+        return { ...entry, models: rows }
+      }))
+      message.success(`已获取 ${catalogue.size} 个模型，已有手动配置已保留`)
     } catch (e) {
       message.error(e instanceof ApiError ? e.message : String(e))
     } finally {
@@ -252,6 +252,7 @@ export default function Settings({ onSaved }: Props) {
         web: cfg.web,
         providers,
         api_keys: keys,
+        update_check: cfg.update_check,
       })
       message.success(res.message)
       await load()
@@ -441,7 +442,7 @@ export default function Settings({ onSaved }: Props) {
                         max={300}
                         value={p.timeout}
                         onChange={(v) => patch(p.id, { timeout: Number(v) || 20 })}
-                        addonAfter="秒"
+                        suffix="秒"
                         style={{ width: 130 }}
                       />
                       <Switch
@@ -460,6 +461,7 @@ export default function Settings({ onSaved }: Props) {
                   </div>
 
                   <Table<Model>
+                    scroll={{ x: 780 }}
                     size="small"
                     rowKey="id"
                     pagination={false}
@@ -517,6 +519,15 @@ export default function Settings({ onSaved }: Props) {
                         },
                       },
                       {
+                        title: '输出上限',
+                        dataIndex: 'output_limit',
+                        width: 116,
+                        render: (v: number | undefined, m) => <InputNumber size="small" min={1}
+                          aria-label={m.id + ' 输出上限'} placeholder="自动" value={v || undefined}
+                          max={m.max_output_tokens || undefined} style={{ width: 100 }}
+                          onChange={(x) => patchModel(p.id, m.id, { output_limit: x || 0 })} />,
+                      },
+                      {
                         title: '温度',
                         dataIndex: 'temperature',
                         width: 96,
@@ -549,6 +560,15 @@ export default function Settings({ onSaved }: Props) {
                       },
                     ]}
                   />
+                  <Input.Search className="manual-model" aria-label={p.label + ' 添加模型'}
+                    placeholder="输入模型 ID，手动添加" enterButton="添加模型"
+                    onSearch={(value, event) => {
+                      const id = value.trim()
+                      if (!id) return
+                      if (p.models.some((m) => m.id === id)) { message.warning('该模型已存在'); return }
+                      patch(p.id, { models: [...p.models, { id, label: id, image: false, reasoning: 'off', temperature: null }] })
+                      if (event?.target instanceof HTMLInputElement) event.target.value = ''
+                    }} />
                 </div>
               ))}
             </>
@@ -633,6 +653,11 @@ export default function Settings({ onSaved }: Props) {
               </div>
             </>
           )}
+          {tab === '更新' && <div className="row">
+            <label htmlFor="auto-update">启动时检查新版本</label>
+            <Switch id="auto-update" checked={cfg.update_check}
+              onChange={(checked) => setCfg({ ...cfg, update_check: checked })} />
+          </div>}
         </div>
       </div>
     </div>

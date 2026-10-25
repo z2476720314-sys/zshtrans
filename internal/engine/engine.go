@@ -2,6 +2,7 @@ package engine
 
 import (
 	"container/list"
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -43,16 +44,15 @@ func New(list []*providers.Provider, pref string, timeout int) *Engine {
 	}
 }
 
-// Rebuild 配置变更后重建（保留健康度与缓存）
+// Rebuild 配置变更后隔离旧模型的缓存和正在执行的请求。
 func (e *Engine) Rebuild(list []*providers.Provider, pref string, timeout int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.providers = list
 	e.pref = pref
 	e.timeout = timeout
-	if e.cache == nil {
-		e.cache = newLRU(config.CacheMax)
-	}
+	e.cache = newLRU(config.CacheMax)
+	e.idx = 0
 }
 
 // Pool 已启用的提供方（对应 pyc pool()）
@@ -87,20 +87,33 @@ func (e *Engine) Statuses() []Status {
 
 // Translate 主翻译流程，严格复刻 pyc TranslateEngine.translate
 func (e *Engine) Translate(text, src, tgt string) (Result, error) {
+	return e.TranslateContext(context.Background(), text, src, tgt)
+}
+
+func (e *Engine) TranslateContext(ctx context.Context, text, src, tgt string) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
 	// 1. 空白折叠
 	norm := strings.Join(strings.Fields(text), " ")
+	e.mu.Lock()
+	cache, pref, index := e.cache, strings.TrimSpace(e.pref), e.idx
+	pool := make([]*providers.Provider, 0, len(e.providers))
+	for _, p := range e.providers {
+		if p.Enabled() {
+			pool = append(pool, p)
+		}
+	}
+	e.mu.Unlock()
 	// 2. 缓存查询
-	if hit, ok := e.cache.Get(cacheKey{norm, src, tgt}); ok {
+	if hit, ok := cache.Get(cacheKey{norm, src, tgt}); ok {
 		return Result{Text: hit, Provider: "cache", MS: 0}, nil
 	}
 	// 3. 提供方池
-	pool := e.Pool()
 	if len(pool) == 0 {
 		return Result{}, ErrNoProvider
 	}
 
-	e.mu.Lock()
-	pref := strings.TrimSpace(e.pref)
 	var prefPool, rest []*providers.Provider
 	if pref != "" {
 		for _, p := range pool {
@@ -117,9 +130,8 @@ func (e *Engine) Translate(text, src, tgt string) (Result, error) {
 	}
 	var start int
 	if len(prefPool) == 0 {
-		start = e.idx % len(ordered)
+		start = index % len(ordered)
 	}
-	e.mu.Unlock()
 
 	// 5. 轮转 + 健康优先
 	order := append(append([]*providers.Provider{}, ordered[start:]...), ordered[:start]...)
@@ -127,8 +139,14 @@ func (e *Engine) Translate(text, src, tgt string) (Result, error) {
 
 	var errs []string
 	for _, p := range order {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
 		t0 := time.Now()
-		out, err := safeCall(p.Fn, text, src, tgt)
+		out, err := safeCall(ctx, p.Fn, text, src, tgt)
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
 		if err != nil {
 			p.MarkFail()
 			errs = append(errs, fmt.Sprintf("%s: %v", p.Name, err))
@@ -137,25 +155,25 @@ func (e *Engine) Translate(text, src, tgt string) (Result, error) {
 		p.MarkOK()
 		e.mu.Lock()
 		for i, item := range pool {
-			if item == p {
+			if item == p && e.cache == cache {
 				e.idx = (i + 1) % len(pool)
 				break
 			}
 		}
 		e.mu.Unlock()
-		e.cache.Put(cacheKey{norm, src, tgt}, out)
+		cache.Put(cacheKey{norm, src, tgt}, out)
 		return Result{Text: out, Provider: p.Name, MS: int(time.Since(t0).Milliseconds())}, nil
 	}
 	return Result{}, fmt.Errorf("all providers failed:\n%s", strings.Join(errs, "\n"))
 }
 
-func safeCall(fn providers.Func, text, src, tgt string) (out string, err error) {
+func safeCall(ctx context.Context, fn providers.Func, text, src, tgt string) (out string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic: %v", r)
 		}
 	}()
-	return fn(text, src, tgt)
+	return fn(ctx, text, src, tgt)
 }
 
 // stableSortByHealth 健康者优先，保持原有相对顺序。

@@ -11,7 +11,7 @@ import (
 
 const (
 	AppName    = "ZSH TRANS"
-	AppVersion = "v3.3"
+	AppVersion = "v3.4"
 	// 原 pyc 常量
 	Timeout  = 8
 	CacheMax = 300
@@ -55,6 +55,7 @@ type Model struct {
 	ThinkingParam  string   `json:"thinking_param,omitempty"`
 	ThinkingBudget int      `json:"thinking_budget,omitempty"`
 	Temperature    *float64 `json:"temperature"`
+	OutputLimit    int      `json:"output_limit,omitempty"`
 	// 以下为模型目录（provider /models）返回的元数据，缺省表示未知
 	ContextWindow   int      `json:"context_window,omitempty"`
 	MaxOutputTokens int      `json:"max_output_tokens,omitempty"`
@@ -113,7 +114,7 @@ func Default() Config {
 		SrcLang:         "auto",
 		TgtLang:         "zh",
 		DefaultProvider: "",
-		Web:             Web{Enabled: true, Host: "0.0.0.0", Port: 8765},
+		Web:             Web{Enabled: true, Host: "127.0.0.1", Port: 8765},
 		APIKeys:         APIKeys{OCRSpace: "helloworld"},
 		UpdateCheck:     true,
 		UpdateRepo:      "z2476720314-sys/zshtrans",

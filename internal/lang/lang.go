@@ -89,7 +89,16 @@ func Resolve(text, src, tgt string) (string, string) {
 
 // Decide 用配置里的 src/tgt 决策（pyc decide_direction）
 func Decide(text, cfgSrc, cfgTgt string) (string, string) {
-	return Resolve(text, cfgSrc, cfgTgt)
+	if Detect(text) != "zh" {
+		return "auto", "zh"
+	}
+	if cfgTgt == "auto" || cfgTgt == "zh" || cfgTgt == "" {
+		cfgTgt = cfgSrc
+		if cfgTgt == "auto" || cfgTgt == "zh" || cfgTgt == "" {
+			cfgTgt = flipOf("zh")
+		}
+	}
+	return "zh", cfgTgt
 }
 
 func flipOf(id string) string {

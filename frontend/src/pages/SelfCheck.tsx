@@ -34,7 +34,7 @@ export default function SelfCheckPanel() {
     { k: '模型卡 / 可用', v: `${data.providers} / ${data.usable}` },
     { k: '常用语', v: String(data.phrases_count) },
     { k: '常用语指纹', v: data.phrases_sha256.slice(0, 16) + '…' },
-    { k: '字形完整', v: data.font_glyphs_ok ? '是' : '否' },
+    { k: '字体显示', v: data.font_glyphs_ok == null ? '使用系统字体：中文 / Русский / English' : data.font_glyphs_ok ? '完整' : '缺失' },
     { k: '翻译缓存', v: `${data.cache} 条` },
   ]
 
@@ -54,7 +54,7 @@ export default function SelfCheckPanel() {
   return (
     <div>
       <div className="langbar">
-        <Badge status={data.ok ? 'success' : 'error'} text={data.ok ? '自检通过' : '自检异常'} />
+        <Badge status={data.ok ? 'success' : 'error'} text={data.ok ? '运行信息已读取' : '运行信息异常'} />
         <div className="spacer" />
         <Tag color="lime">{data.version}</Tag>
       </div>
@@ -113,7 +113,7 @@ export default function SelfCheckPanel() {
                 </span>
               ) : (
                 <span className="mono">
-                  {upd && !upd.ok ? upd.error || '检查失败' : `${upd?.current ?? data.version}（已是最新）`}
+                  {!upd ? '尚未取得更新信息' : !upd.ok ? upd.error || '检查失败' : `${upd.current}（已是最新）`}
                 </span>
               ),
             },

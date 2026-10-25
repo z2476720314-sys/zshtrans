@@ -2,6 +2,7 @@ package providers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,13 +11,13 @@ import (
 )
 
 // postRaw 返回原始响应体，供三种协议自行解包
-func postRaw(url string, body map[string]any, hdr map[string]string, timeoutSec int) ([]byte, error) {
+func postRaw(ctx context.Context, url string, body map[string]any, hdr map[string]string, timeoutSec int) ([]byte, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	client := newHTTPClient(timeoutSec)
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
 	if err != nil {
 		return nil, err
 	}

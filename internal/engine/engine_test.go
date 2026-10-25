@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -9,15 +10,15 @@ import (
 	"github.com/local/zshtrans/internal/providers"
 )
 
-func mkProvider(name string, fn providers.Func) *providers.Provider {
-	return providers.NewProvider(name, fn)
+func mkProvider(name string, fn func(string, string, string) (string, error)) *providers.Provider {
+	return providers.NewProvider(name, func(_ context.Context, text, src, tgt string) (string, error) { return fn(text, src, tgt) })
 }
 
-func ok(text string) providers.Func {
+func ok(text string) func(string, string, string) (string, error) {
 	return func(src, s, t string) (string, error) { return text, nil }
 }
 
-func bad(msg string) providers.Func {
+func bad(msg string) func(string, string, string) (string, error) {
 	return func(src, s, t string) (string, error) { return "", errors.New(msg) }
 }
 

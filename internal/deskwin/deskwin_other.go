@@ -8,11 +8,12 @@ import "errors"
 
 // Settings 窗口初始参数
 type Settings struct {
-	Title  string
-	URL    string
-	Width  int
-	Height int
-	Debug  bool
+	DataPath string
+	Title    string
+	URL      string
+	Width    int
+	Height   int
+	Debug    bool
 }
 
 // ErrUnavailable 本平台不支持 WebView2 桌面窗口
@@ -64,4 +65,7 @@ func (*Win) HWND() uintptr { return 0 }
 func (*Win) Toggle() {}
 
 // Available 占位实现
-func (*Win) Available() bool { return false }
+func (*Win) Available() bool        { return false }
+func (*Win) Visible() bool          { return false }
+func (*Win) PrepareSelection() bool { return false }
+func ShowError(string)              {}

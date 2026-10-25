@@ -53,15 +53,16 @@ func TestCompareVersions(t *testing.T) {
 func TestCheckPEFixture(t *testing.T) {
 	dir := t.TempDir()
 
-	// 合法：MZ 头 + 0x3C 处指向 PE 签名
-	good := make([]byte, 0x200)
-	good[0], good[1] = 'M', 'Z'
+	// 真实测试二进制也是 x64 PE；只有签名的合成文件不能作为合法更新包。
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	good, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
 	off := 0x40
-	good[0x3C] = byte(off)
-	good[0x3D] = 0
-	good[0x3E] = 0
-	good[0x3F] = 0
-	copy(good[off:], []byte{'P', 'E', 0, 0})
 	goodPath := dir + "/good.exe"
 	if err := writeFile(goodPath, good); err != nil {
 		t.Fatal(err)

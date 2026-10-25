@@ -1,12 +1,15 @@
 package ocr
 
 import (
+	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"image"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/local/zshtrans/internal/logx"
 )
@@ -20,20 +23,23 @@ type Result struct {
 
 // Keys 密钥来源
 type Keys struct {
-	Space     string
-	BaiduAK   string
-	BaiduSK   string
-	SrcLang   string
-	Vision    VisionFn
-	VisionTag string
+	Space         string
+	BaiduAK       string
+	BaiduSK       string
+	SrcLang       string
+	Vision        VisionFn
+	VisionContext func(context.Context, string) (string, error)
+	VisionTag     string
+	VisionScope   string
 }
 
 // cache OCR 结果缓存（对应 pyc _OCR_CACHE）
 type cache struct {
-	mu    sync.Mutex
-	items map[string]string
-	cap   int
-	order []string
+	mu         sync.Mutex
+	items      map[string]string
+	cap        int
+	order      []string
+	generation uint64
 }
 
 var ocrCache = &cache{items: map[string]string{}, cap: 60}
@@ -45,9 +51,12 @@ func (c *cache) get(k string) (string, bool) {
 	return v, ok
 }
 
-func (c *cache) put(k, v string) {
+func (c *cache) put(k, v string, generation uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.generation != generation {
+		return
+	}
 	if _, ok := c.items[k]; !ok {
 		c.order = append(c.order, k)
 	}
@@ -59,130 +68,120 @@ func (c *cache) put(k, v string) {
 	}
 }
 
-// Run 多引擎并行 + 中位数择优（对应 pyc run_ocr）
+// ResetCache 隔离设置变更前的识别结果，包括仍在执行的请求。
+func ResetCache() {
+	ocrCache.mu.Lock()
+	defer ocrCache.mu.Unlock()
+	ocrCache.generation++
+	ocrCache.items = map[string]string{}
+	ocrCache.order = nil
+}
+
+// Run 同一候选内多引擎并行；未识别到文字才尝试下一候选。
 func Run(img image.Image, keys Keys) (Result, error) {
-	cands := Candidates(img)
-	if len(cands) == 0 {
+	return RunContext(context.Background(), img, keys)
+}
+
+func RunContext(ctx context.Context, img image.Image, keys Keys) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	started := time.Now()
+	if img == nil {
 		return Result{}, errors.New("no image candidate")
 	}
-
-	type outcome struct {
+	type engine struct {
 		name string
-		cand string
-		text string
-		err  error
+		fn   func(string) (string, error)
 	}
-
-	var collected []outcome
-	var hits []outcome
-	var errs []string
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-
-	// 每个候选图跑所有可用引擎
-	for _, cand := range cands {
-		cand := cand
-		b64 := B64(cand.PNG)
-		if hit, ok := ocrCache.get("raw:" + hashKey(b64)); ok {
-			hits = append(hits, outcome{name: "cache", text: hit})
-			continue
+	engines := make([]engine, 0, 3)
+	if keys.Vision != nil || keys.VisionContext != nil {
+		tag := keys.VisionTag
+		if tag == "" {
+			tag = "vision"
 		}
-		type engine struct {
-			name string
-			fn   func(string) (string, error)
-		}
-		engines := make([]engine, 0, 3)
-		if keys.Vision != nil {
-			tag := keys.VisionTag
-			if tag == "" {
-				tag = "vision"
+		engines = append(engines, engine{tag, func(s string) (string, error) {
+			if keys.VisionContext != nil {
+				return keys.VisionContext(ctx, s)
 			}
-			engines = append(engines, engine{tag, func(s string) (string, error) { return Vision(s, keys.Vision) }})
+			return Vision(s, keys.Vision)
+		}})
+	}
+	if strings.TrimSpace(keys.Space) != "" {
+		engines = append(engines, engine{"ocr.space", func(s string) (string, error) { return SpaceContext(ctx, s, keys.Space, keys.SrcLang) }})
+	}
+	if strings.TrimSpace(keys.BaiduAK) != "" && strings.TrimSpace(keys.BaiduSK) != "" {
+		engines = append(engines, engine{"baidu-ocr", func(s string) (string, error) { return BaiduContext(ctx, s, keys.BaiduAK, keys.BaiduSK) }})
+	}
+	if len(engines) == 0 {
+		return Result{}, errors.New("no OCR engine available (set a vision model or OCR key in settings)")
+	}
+	raw, err := EncodePNG(img)
+	if err != nil {
+		return Result{}, err
+	}
+	ocrCache.mu.Lock()
+	generation := ocrCache.generation
+	ocrCache.mu.Unlock()
+	scope := fmt.Sprintf("%d\x00%s\x00%s\x00%s\x00%t\x00%s\x00%s\x00%s", generation, keys.SrcLang, keys.VisionTag, keys.VisionScope, keys.Vision != nil || keys.VisionContext != nil, keys.Space, keys.BaiduAK, keys.BaiduSK)
+	key := hashKey(scope + "\x00" + string(raw))
+	if hit, ok := ocrCache.get(key); ok {
+		return Result{Text: hit, Engine: "cache"}, nil
+	}
+	type outcome struct {
+		name, text string
+		err        error
+	}
+	var errs []string
+	cands := Candidates(img)
+	for _, cand := range cands {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
 		}
-		if strings.TrimSpace(keys.Space) != "" {
-			engines = append(engines, engine{"ocr.space", func(s string) (string, error) { return Space(s, keys.Space, keys.SrcLang) }})
-		}
-		if strings.TrimSpace(keys.BaiduAK) != "" && strings.TrimSpace(keys.BaiduSK) != "" {
-			engines = append(engines, engine{"baidu-ocr", func(s string) (string, error) { return Baidu(s, keys.BaiduAK, keys.BaiduSK) }})
-		}
-		if len(engines) == 0 {
-			return Result{}, errors.New("no OCR engine available (set a vision model or OCR key in settings)")
-		}
-		for _, eng := range engines {
-			eng := eng
+		b64 := B64(cand.PNG)
+		results := make([]outcome, len(engines))
+		var wg sync.WaitGroup
+		for i, eng := range engines {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				text, err := eng.fn(b64)
-				mu.Lock()
-				defer mu.Unlock()
-				if err != nil {
-					logx.Warn("ocr %s [%s]: %v", eng.name, cand.Name, err)
-					errs = append(errs, fmt.Sprintf("%s [%s]: %v", eng.name, cand.Name, err))
-					return
-				}
-				if strings.TrimSpace(text) == "" {
-					logx.Warn("ocr %s [%s]: no text -> next candidate", eng.name, cand.Name)
-					errs = append(errs, fmt.Sprintf("%s [%s]: no text recognized", eng.name, cand.Name))
-					return
-				}
-				collected = append(collected, outcome{name: eng.name, cand: cand.Name, text: text})
+				results[i] = outcome{eng.name, strings.TrimSpace(text), err}
 			}()
 		}
-	}
-	wg.Wait()
-	if len(hits) > 0 {
-		best := hits[0]
-		return Result{Text: best.text, Engine: best.name}, nil
-	}
-
-	if len(collected) == 0 {
-		// 对齐 pyc：失败信息带图像尺寸/候选数/背景/缩放，并逐引擎列出原因。
-		// bg 现在是真实的 Otsu 阈值（原版写死 255，排查时看不出图像明暗）。
-		detail := strings.Join(errs, "\n")
-		if detail == "" {
-			detail = "no engine produced text"
+		wg.Wait()
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
 		}
-		bg := Otsu(Gray(img))
-		// x 是候选里最大的放大倍数（原版写死 1.0，多候选时看不出放大了几倍）
-		scale := 1.0
-		for _, c := range cands {
-			if c.Scale > scale {
-				scale = c.Scale
+		var collected []outcome
+		for _, result := range results {
+			if result.err == nil && result.text != "" {
+				collected = append(collected, result)
+				continue
 			}
+			err := result.err
+			if err == nil {
+				err = errors.New("no text recognized")
+			}
+			logx.Warn("ocr %s [%s]: %v", result.name, cand.Name, err)
+			errs = append(errs, fmt.Sprintf("%s [%s]: %v", result.name, cand.Name, err))
 		}
-		return Result{}, fmt.Errorf("all OCR failed (img %dx%d, %d cands, bg=%d, x%.1f):\n%s",
-			img.Bounds().Dx(), img.Bounds().Dy(), len(cands), bg, scale, detail)
-	}
-
-	// 中位数长度择优（对应 pyc _ocr_median）
-	sort.SliceStable(collected, func(i, j int) bool {
-		return len([]rune(collected[i].text)) < len([]rune(collected[j].text))
-	})
-	best := collected[len(collected)/2]
-	// 缓存键必须跟着「产出 best 的那个候选图」走。原来恒用 cands[0]，
-	// 若 best 来自 binary/scaled 候选，下次会拿原图的键命中错误结果、并跳过更优候选。
-	keyCand := cands[0]
-	for _, c := range cands {
-		if c.Name == best.cand {
-			keyCand = c
-			break
+		if len(collected) == 0 {
+			continue
 		}
+		sort.SliceStable(collected, func(i, j int) bool { return len([]rune(collected[i].text)) < len([]rune(collected[j].text)) })
+		best := collected[len(collected)/2]
+		ocrCache.put(key, best.text, generation)
+		return Result{Text: best.text, Engine: best.name, MS: int(time.Since(started).Milliseconds())}, nil
 	}
-	ocrCache.put("raw:"+hashKey(B64(keyCand.PNG)), best.text)
-	return Result{Text: best.text, Engine: best.name}, nil
+	scale := 1.0
+	for _, cand := range cands {
+		scale = max(scale, cand.Scale)
+	}
+	return Result{}, fmt.Errorf("all OCR failed (img %dx%d, %d cands, bg=%d, x%.1f):\n%s", img.Bounds().Dx(), img.Bounds().Dy(), len(cands), Otsu(Gray(img)), scale, strings.Join(errs, "\n"))
 }
 
-// hashKey 轻量内容指纹，避免依赖 crypto 开销
+// hashKey 缓存中只保存内容与配置指纹，不保留凭据。
 func hashKey(s string) string {
-	var h uint64 = 1469598103934665603
-	for i := 0; i < len(s); i++ {
-		h ^= uint64(s[i])
-		h *= 1099511628211
-	}
-	var buf [16]byte
-	for i := 0; i < 16; i++ {
-		buf[i] = byte(h >> (uint(i) * 4))
-	}
-	return string(buf[:])
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(s)))
 }

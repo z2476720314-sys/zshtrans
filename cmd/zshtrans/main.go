@@ -10,11 +10,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/local/zshtrans/internal/assets"
+	"github.com/local/zshtrans/internal/capture"
 	"github.com/local/zshtrans/internal/config"
 	"github.com/local/zshtrans/internal/console"
 	"github.com/local/zshtrans/internal/deskwin"
@@ -70,13 +72,17 @@ func main() {
 			}
 			url := fmt.Sprintf("http://127.0.0.1:%d/", p)
 			logx.Info("another instance running, activating")
-			// 优先唤醒已有桌面窗口；做不到再退回浏览器
+			// 正常桌面模式只唤醒已有窗口；浏览器仅用于显式 -web 调试。
 			activated := false
-			if !*useWeb {
+			if !*useWeb && !*noOpen {
 				activated = deskwin.ActivateExisting(winTitle)
 			}
-			if !activated && !*noOpen {
+			if !activated && *useWeb && !*noOpen {
 				openBrowser(url)
+			}
+			if !activated && !*useWeb && !*noOpen {
+				fmt.Fprintf(os.Stderr, "%s 已在运行，请从托盘打开主窗口\n", config.AppName)
+				return
 			}
 			fmt.Printf("%s 已在运行，已唤起\n", config.AppName)
 			return
@@ -89,6 +95,11 @@ func main() {
 		}
 	}
 
+	if err := config.MigrateLegacy(); err != nil {
+		logx.Err("legacy profile migration failed: %v", err)
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
 	phrases.Init(config.PhrasesPath())
 	phrases.Seed()
 
@@ -96,6 +107,9 @@ func main() {
 	cfg := app.Config()
 
 	listenHost := cfg.Web.Host
+	if !*useWeb {
+		listenHost = "127.0.0.1"
+	}
 	if *host != "" {
 		listenHost = *host
 	}
@@ -114,6 +128,13 @@ func main() {
 	}
 
 	srv := server.New(app, asset)
+	srv.SetResultHook(func(result server.Result) {
+		if err := deskwin.ShowResult(deskwin.Result{Source: result.Source, Text: result.Text, Provider: result.Provider, Milliseconds: int64(result.MS)}); err != nil {
+			logx.Warn("result popup unavailable: %v", err)
+		}
+	})
+	defer deskwin.CloseResult()
+	defer capture.CloseInteractive()
 	addr := net.JoinHostPort(listenHost, strconv.Itoa(listenPort))
 	httpSrv := &http.Server{
 		Addr:              addr,
@@ -144,15 +165,18 @@ func main() {
 	var win *deskwin.Win
 	if !*useWeb && !*noOpen {
 		w, wErr := deskwin.Open(deskwin.Settings{
-			Title:  winTitle,
-			URL:    localURL,
-			Width:  1180,
-			Height: 820,
-			Debug:  *wvDebug,
+			DataPath: filepath.Join(config.BaseDir(), "WebView2"),
+			Title:    winTitle,
+			URL:      localURL,
+			Width:    1180,
+			Height:   820,
+			Debug:    *wvDebug,
 		})
 		if wErr != nil {
-			logx.Warn("webview2 unavailable, fallback to browser: %v", wErr)
-			fmt.Fprintf(os.Stderr, "WebView2 不可用（%v），改用浏览器承载界面\n", wErr)
+			logx.Err("webview2 unavailable: %v", wErr)
+			deskwin.ShowError("无法创建桌面窗口。请安装或修复 Microsoft Edge WebView2 Runtime 后重试。\n\n" + wErr.Error())
+			_ = ln.Close()
+			os.Exit(1)
 		} else {
 			win = w
 			srv.SetWindower(win)
@@ -198,8 +222,8 @@ func main() {
 		})
 	}
 
-	// 无桌面窗口时退回浏览器（-web / -no-open 组合或 WebView2 缺失）
-	if win == nil && !*noOpen {
+	// 浏览器只作为显式要求的开发审查入口。
+	if *useWeb && !*noOpen {
 		openBrowser(localURL)
 	}
 
@@ -215,7 +239,9 @@ func main() {
 			win.Show()
 			return
 		}
-		openBrowser(localURL + hash)
+		if *useWeb {
+			openBrowser(localURL + hash)
+		}
 	}
 
 	if !*noTray {

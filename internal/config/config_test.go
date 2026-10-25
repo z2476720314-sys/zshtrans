@@ -7,6 +7,24 @@ import (
 	"testing"
 )
 
+func TestModelPreservesLegacyOutputLimit(t *testing.T) {
+	var model Model
+	if err := json.Unmarshal([]byte(`{"id":"translator","output_limit":4096,"max_output_tokens":65536}`), &model); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved["output_limit"] != float64(4096) || saved["max_output_tokens"] != float64(65536) {
+		t.Fatalf("user output limit must survive separately from model capacity: %s", raw)
+	}
+}
+
 // TestDefaultSane 默认配置的关键字段必须与 pyc DEFAULT_CONFIG 一致
 func TestDefaultSane(t *testing.T) {
 	c := Default()
@@ -16,7 +34,7 @@ func TestDefaultSane(t *testing.T) {
 	if c.APIKeys.OCRSpace != "helloworld" {
 		t.Errorf("default ocrspace = %q, want helloworld", c.APIKeys.OCRSpace)
 	}
-	if !c.Web.Enabled || c.Web.Host != "0.0.0.0" || c.Web.Port != 8765 {
+	if !c.Web.Enabled || c.Web.Host != "127.0.0.1" || c.Web.Port != 8765 {
 		t.Errorf("default web = %+v", c.Web)
 	}
 	if c.Hotkeys.Selection != "ctrl+alt+t" || c.Hotkeys.Screenshot != "ctrl+alt+s" ||

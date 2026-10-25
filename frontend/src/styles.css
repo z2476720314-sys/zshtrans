@@ -1,4 +1,4 @@
-/* 全局样式：炭黑 + 酸性青柠 + 珊瑚粉，玻璃质感面板 */
+/* 紧凑双栏翻译工作区：平面深色表面，青柠仅强调主要操作。 */
 
 :root {
   --ink: #0B0C10;
@@ -35,78 +35,11 @@ body,
 body {
   background: var(--ink);
   color: var(--text);
-  font-family: 'Inter', 'Segoe UI', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+  font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }
 
-/* 背景光团 */
-.aurora {
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  overflow: hidden;
-  z-index: 0;
-}
-
-.aurora i {
-  position: absolute;
-  display: block;
-  border-radius: 50%;
-  filter: blur(90px);
-  opacity: 0.4;
-}
-
-.aurora i:nth-child(1) {
-  width: 44vw;
-  height: 44vw;
-  left: -10vw;
-  top: -14vw;
-  background: radial-gradient(circle, #b8ff3c 0%, transparent 68%);
-  animation: drift1 21s ease-in-out infinite alternate;
-}
-
-.aurora i:nth-child(2) {
-  width: 40vw;
-  height: 40vw;
-  right: -12vw;
-  top: 18vh;
-  background: radial-gradient(circle, #ff5c7a 0%, transparent 70%);
-  animation: drift2 26s ease-in-out infinite alternate;
-}
-
-.aurora i:nth-child(3) {
-  width: 34vw;
-  height: 34vw;
-  left: 32vw;
-  bottom: -18vw;
-  background: radial-gradient(circle, #4ad6ff 0%, transparent 72%);
-  animation: drift3 23s ease-in-out infinite alternate;
-}
-
-@keyframes drift1 {
-  to {
-    transform: translate3d(9vw, 7vh, 0) scale(1.16);
-  }
-}
-
-@keyframes drift2 {
-  to {
-    transform: translate3d(-8vw, -9vh, 0) scale(1.12);
-  }
-}
-
-@keyframes drift3 {
-  to {
-    transform: translate3d(6vw, -6vh, 0) scale(1.2);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .aurora i {
-    animation: none !important;
-  }
-}
 
 /* 外壳 */
 .shell {
@@ -120,11 +53,11 @@ body {
 .topbar {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 14px 22px;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--line);
-  background: rgba(11, 12, 16, 0.72);
-  backdrop-filter: blur(14px);
+  background: var(--ink);
 }
 
 .brand {
@@ -133,7 +66,8 @@ body {
   gap: 10px;
 }
 
-.brand b {
+.brand h1 {
+  margin: 0;
   font-size: 17px;
   letter-spacing: 0.16em;
   font-weight: 700;
@@ -187,17 +121,37 @@ body {
   gap: 14px;
   height: 100%;
   min-height: 320px;
-  max-height: 640px;
 }
 
-@media (max-width: 900px) {
+.translate-view { height: 100%; }
+.translate-view[hidden] { display: none; }
+.manual-model { margin-top: 12px; max-width: 460px; }
+button:focus-visible, textarea.editor:focus-visible {
+  outline: 2px solid var(--lime);
+  outline-offset: -2px;
+}
+::selection { color: var(--ink); background: var(--lime); }
+
+@media (max-width: 820px) {
+  .brand { width: 100%; justify-content: space-between; }
+  .topbar > .pill { display: none; }
+  .settings-grid .navlist { flex-direction: row; flex-wrap: wrap; }
+  .body { padding: 12px; }
+  .chain { flex-wrap: wrap; max-height: 86px; overflow: auto; }
+}
+
+@media (max-width: 680px) {
   .workgrid {
     grid-template-columns: minmax(0, 1fr);
+    height: auto;
+  }
+  .workgrid > .panel {
+    min-height: 260px;
   }
 }
 
 .panel {
-  background: linear-gradient(180deg, rgba(28, 31, 40, 0.92), rgba(21, 23, 30, 0.94));
+  background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   display: flex;
@@ -209,6 +163,7 @@ body {
 .panel-head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 7px 10px 7px 6px;
   border-bottom: 1px solid var(--line);
@@ -262,25 +217,25 @@ textarea.editor {
   outline: 0;
   background: transparent;
   color: var(--text);
-  font: 15px/1.72 'Inter', 'Microsoft YaHei', system-ui, sans-serif;
+  font: 15px/1.72 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
   padding: 16px 18px;
 }
 
 textarea.editor::placeholder {
-  color: #5A5F6E;
+  color: #9DA3B2;
 }
 
 .outtext {
   flex: 1;
   padding: 16px 18px;
-  font: 15px/1.72 'Inter', 'Microsoft YaHei', system-ui, sans-serif;
+  font: 15px/1.72 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
   white-space: pre-wrap;
   word-break: break-word;
   overflow: auto;
 }
 
 .outtext.empty {
-  color: #5A5F6E;
+  color: #9DA3B2;
 }
 
 /* 语言栏 */
@@ -504,6 +459,16 @@ kbd {
   align-items: start;
 }
 
+.settings-grid > div { min-width: 0; }
+.row > :not(label) { min-width: 0; }
+.row > .ant-switch { justify-self: start; }
+.row > div[style] { flex-wrap: wrap; }
+
+@media (max-width: 480px) {
+  .settings-grid .row { grid-template-columns: 90px minmax(0, 1fr); }
+  .settings-grid .card { padding: 12px; }
+}
+
 @media (max-width: 820px) {
   .settings-grid {
     grid-template-columns: minmax(0, 1fr);
@@ -552,6 +517,7 @@ kbd {
 .card-head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   margin-bottom: 10px;
 }
@@ -607,7 +573,7 @@ kbd {
   position: fixed;
   right: 24px;
   bottom: 24px;
-  width: 430px;
+  width: min(430px, calc(100vw - 48px));
   max-height: 62vh;
   z-index: 40;
   border-radius: var(--radius);

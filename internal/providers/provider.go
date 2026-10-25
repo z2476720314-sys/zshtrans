@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"context"
 	"math"
 	"sync"
 	"time"
@@ -101,15 +102,15 @@ func DirectNeedKeys(name string) []string {
 // BuildDirect 按 pyc TranslateEngine.__init__ 顺序与 need_keys 构建 9 个直连提供方
 func BuildDirect(k Keys) []*Provider {
 	rows := []*Provider{
-		NewProvider("qwen-max", func(t, s, g string) (string, error) { return tQwenMax(t, s, g, k) }, "qwen"),
-		NewProvider("qwen-max-2606", func(t, s, g string) (string, error) { return tQwenMaxSnap(t, s, g, k) }, "qwen"),
+		NewProvider("qwen-max", func(ctx context.Context, t, s, g string) (string, error) { return tQwenMax(ctx, t, s, g, k) }, "qwen"),
+		NewProvider("qwen-max-2606", func(ctx context.Context, t, s, g string) (string, error) { return tQwenMaxSnap(ctx, t, s, g, k) }, "qwen"),
 		NewProvider("google", tGoogle),
 		NewProvider("mymemory", tMyMemory),
-		NewProvider("deepl", func(t, s, g string) (string, error) { return tDeepL(t, s, g, k) }, "deepl"),
-		NewProvider("baidu", func(t, s, g string) (string, error) { return tBaidu(t, s, g, k) }, "baidu_appid", "baidu_key"),
-		NewProvider("niutrans", func(t, s, g string) (string, error) { return tNiuTrans(t, s, g, k) }, "niutrans"),
+		NewProvider("deepl", func(ctx context.Context, t, s, g string) (string, error) { return tDeepL(ctx, t, s, g, k) }, "deepl"),
+		NewProvider("baidu", func(ctx context.Context, t, s, g string) (string, error) { return tBaidu(ctx, t, s, g, k) }, "baidu_appid", "baidu_key"),
+		NewProvider("niutrans", func(ctx context.Context, t, s, g string) (string, error) { return tNiuTrans(ctx, t, s, g, k) }, "niutrans"),
 		NewProvider("lingva", tLingva),
-		NewProvider("agnes", func(t, s, g string) (string, error) { return tAgnes(t, s, g, k) }, "agnes"),
+		NewProvider("agnes", func(ctx context.Context, t, s, g string) (string, error) { return tAgnes(ctx, t, s, g, k) }, "agnes"),
 	}
 	for _, p := range rows {
 		p.BindKeys(k.Has)

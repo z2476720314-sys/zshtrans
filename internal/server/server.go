@@ -71,16 +71,20 @@ func guardHost(next http.Handler) http.Handler {
 
 // loopbackOnly 只允许本机发起的请求（管理类接口用，局域网页面只需 translate/status）
 func loopbackOnly(w http.ResponseWriter, r *http.Request) bool {
+	if !localRequest(r) {
+		writeErr(w, http.StatusForbidden, "该接口只允许本机访问")
+		return false
+	}
+	return true
+}
+
+func localRequest(r *http.Request) bool {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
 	ip := net.ParseIP(strings.Trim(host, "[]"))
-	if ip == nil || !ip.IsLoopback() {
-		writeErr(w, http.StatusForbidden, "该接口只允许本机访问")
-		return false
-	}
-	return true
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Server) routes() {
@@ -89,7 +93,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/translate", s.handleTranslate)
 
 	// 重构新增
-	s.mux.HandleFunc("/api/config", s.handleConfig)
+	s.mux.HandleFunc("/api/config", s.adminOnly(s.handleConfig))
 	// 设置/更新/原生能力属于管理面，只允许本机访问：
 	// 默认监听 0.0.0.0 且无鉴权，否则同网段任何人（或恶意网页）都能改配置劫持密钥。
 	s.mux.HandleFunc("/api/settings", s.adminOnly(s.handleSettings))
@@ -111,7 +115,7 @@ func (s *Server) routes() {
 	// 原生能力：划词翻译 / 截图取词 / 热键事件流
 	s.mux.HandleFunc("/api/selection", s.adminOnly(s.handleSelection))
 	s.mux.HandleFunc("/api/capture", s.adminOnly(s.handleCapture))
-	s.mux.HandleFunc("/api/events", s.handleEvents)
+	s.mux.HandleFunc("/api/events", s.adminOnly(s.handleEvents))
 
 	// 静态资源与 SPA 兜底
 	s.mux.HandleFunc("/", s.handleStatic)
@@ -139,7 +143,11 @@ func (s *Server) adminOnly(fn http.HandlerFunc) http.HandlerFunc {
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin != "" && allowedOrigin(origin) {
+		if origin != "" && !allowedOrigin(origin, r) {
+			writeErr(w, http.StatusForbidden, "该请求不是来自当前应用")
+			return
+		}
+		if origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
@@ -154,20 +162,16 @@ func withCORS(next http.Handler) http.Handler {
 }
 
 // allowedOrigin 判断 Origin 是否属于本机或私有局域网（http://127.0.0.1:8765 等）
-func allowedOrigin(origin string) bool {
+func allowedOrigin(origin string, r *http.Request) bool {
 	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		return false
 	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return false
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
 	}
-	host := u.Hostname()
-	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && (ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast())
+	return u.Scheme == scheme && strings.EqualFold(u.Host, r.Host)
 }
 
 // withLog 静默请求日志（对应 pyc log_message 不刷屏，写文件不写控制台）
@@ -239,14 +243,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := s.app.Config()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"app":       config.AppName,
-		"version":   config.AppVersion,
-		"providers": s.app.Engine().Statuses(),
-		"src":       cfg.SrcLang,
-		"tgt":       cfg.TgtLang,
-		"default":   cfg.DefaultProvider,
-		"cache":     s.app.Engine().Len(),
-		"lan":       LanIP(),
+		"app":          config.AppName,
+		"version":      config.AppVersion,
+		"providers":    s.app.Engine().Statuses(),
+		"src":          cfg.SrcLang,
+		"tgt":          cfg.TgtLang,
+		"default":      cfg.DefaultProvider,
+		"cache":        s.app.Engine().Len(),
+		"lan":          LanIP(),
+		"desktop":      s.app.windower() != nil,
+		"update_check": cfg.UpdateCheck,
+		"local":        localRequest(r),
 	})
 }
 
@@ -287,7 +294,7 @@ func (s *Server) handleTranslate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	src, tgt = resolveDirection(text, src, tgt)
-	res, err := s.app.Engine().Translate(text, src, tgt)
+	res, err := s.app.Engine().TranslateContext(r.Context(), text, src, tgt)
 	if err != nil {
 		logx.Err("translate fail: %v", err)
 		writeErr(w, http.StatusBadGateway, err.Error())
@@ -809,7 +816,7 @@ func (s *Server) handleOCR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := s.app.Config()
-	res, err := ocr.Run(img, s.app.ocrKeys(cfg))
+	res, err := ocr.RunContext(r.Context(), img, s.app.ocrKeys(cfg))
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -842,7 +849,7 @@ func (s *Server) handleSelfCheck(w http.ResponseWriter, r *http.Request) {
 		"ui_toolkit":            "React + Ant Design",
 		"phrases_count":         len(list),
 		"phrases_sha256":        hex.EncodeToString(h.Sum(nil)),
-		"font_glyphs_ok":        true, // Web 端由浏览器字体栈保证，无 Qt 字形表可校验
+		"font_glyphs_ok":        nil,
 		"providers":             len(cfg.Providers),
 		"usable":                len(providers.UsableProviders(cfg.Providers, cfg.APIKeys, envOrNil())),
 		"cache":                 s.app.Engine().Len(),

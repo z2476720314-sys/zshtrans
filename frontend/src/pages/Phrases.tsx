@@ -3,6 +3,7 @@ import { Button, Empty, Input, Modal, Popconfirm, Tooltip } from 'antd'
 import { message } from '../toast'
 import {
   DeleteOutlined,
+  CopyOutlined,
   EditOutlined,
   PlusOutlined,
   SendOutlined,
@@ -124,18 +125,24 @@ export default function Phrases({ onInsert }: Props) {
               <div className="content">{it.content}</div>
             </div>
             <div className="ops">
+              <Tooltip title="复制常用语">
+                <button className="icon-btn" aria-label="复制常用语" type="button"
+                  onClick={() => void navigator.clipboard.writeText(it.content).then(
+                    () => message.success('已复制'), () => message.error('复制失败，请手动选择文字'),
+                  )}><CopyOutlined /></button>
+              </Tooltip>
               <Tooltip title="插入到翻译框">
-                <button className="icon-btn" onClick={() => onInsert(it.content)} type="button">
+                <button className="icon-btn" aria-label="插入到翻译框" onClick={() => onInsert(it.content)} type="button">
                   <SendOutlined />
                 </button>
               </Tooltip>
               <Tooltip title="编辑">
-                <button className="icon-btn" onClick={() => openEdit(it)} type="button">
+                <button className="icon-btn" aria-label="编辑常用语" onClick={() => openEdit(it)} type="button">
                   <EditOutlined />
                 </button>
               </Tooltip>
               <Popconfirm title="删除这条常用语？" okText="删除" cancelText="取消" onConfirm={() => void remove(it)}>
-                <button className="icon-btn danger" type="button">
+                <button className="icon-btn danger" aria-label="删除常用语" type="button">
                   <DeleteOutlined />
                 </button>
               </Popconfirm>
