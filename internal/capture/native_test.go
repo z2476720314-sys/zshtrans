@@ -99,6 +99,41 @@ func TestNativeCompleteNeverBecomesOCR(t *testing.T) {
 	}
 }
 
+func TestNativeTerminalIgnoresLateDisconnect(t *testing.T) {
+	for _, name := range []string{
+		"onScreenShotComplete", "onScreenShotCancel", "onScreenShotShare",
+		"onScreenShotLongCaptureOk", "onScreenShotLongCaptureSave", "onScreenShotLongCaptureCollect",
+		"onScreenShotLongCaptureTransfer", "onScreenShotLongCaptureSendToMobile", "onScreenShotLongCaptureSaveToEmoj",
+		"onScreenShotRequestTranslate", "onScreenShotRequestOCR",
+	} {
+		t.Run(name, func(t *testing.T) {
+			start := time.Unix(100, 0)
+			var state captureState
+			state.accept(nativeEvent{Name: name, Payload: []byte("image.png")}, start)
+			action := state.Action
+			state.accept(nativeEvent{Name: "IPC_DISCONNECTED"}, start.Add(100*time.Millisecond))
+			if state.Err != nil || state.Action != action || !state.ready(start.Add(captureIdleGrace)) {
+				t.Fatalf("late disconnect changed completed capture: %+v", state)
+			}
+		})
+	}
+}
+
+func TestNativeCaptureStillReportsInvalidCallbacks(t *testing.T) {
+	start := time.Unix(100, 0)
+	var disconnected captureState
+	disconnected.accept(nativeEvent{Name: "IPC_DISCONNECTED"}, start)
+	if disconnected.Err == nil {
+		t.Fatal("unexpected disconnect before completion was hidden")
+	}
+	var malformed captureState
+	malformed.accept(nativeEvent{Name: "onScreenShotCancel"}, start)
+	malformed.accept(nativeEvent{Name: "IPC_PAYLOAD_ERROR"}, start.Add(100*time.Millisecond))
+	if malformed.Err == nil {
+		t.Fatal("malformed delayed image request was hidden by cancellation")
+	}
+}
+
 func TestToolbarPatchRejectsUnknownInstruction(t *testing.T) {
 	for _, b := range [][]byte{{0x48, 0x8d, 0x4d, 0xe0}, {0x48, 0x8d, 0x4d, 0xe8}} {
 		got, err := repairedInstruction(b)

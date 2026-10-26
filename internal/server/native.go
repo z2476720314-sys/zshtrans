@@ -107,8 +107,12 @@ func capturePopup(ctx context.Context, app *App, req captureRequest) (Result, er
 }
 
 func processCapture(ctx context.Context, app *App, captured capture.CaptureResult) (Result, error) {
-	if captured.Action == "complete" || captured.Action == "cancel" {
-		return Result{Action: captured.Action}, nil
+	switch captured.Action {
+	case "ocr", "translate":
+	case "cancel":
+		return Result{Action: "cancel"}, nil
+	default:
+		return Result{Action: "complete"}, nil
 	}
 	start := time.Now()
 	img, err := ocr.Decode(captured.PNG)

@@ -75,23 +75,22 @@ func NewManager() *Manager {
 // Bind 设置一组热键；handler 按 name 分发。
 // 只记录配置，真正的 RegisterHotKey 在 Start 的消息线程里执行。
 // 返回 nil 表示格式校验通过（是否被系统占用要到 Start/Rebind 才知道）。
-func (m *Manager) Bind(selection, screenshot, window, close string, handler func(name string)) error {
-	return m.Rebind(selection, screenshot, window, close, handler)
+func (m *Manager) Bind(selection, screenshot, window string, handler func(name string)) error {
+	return m.Rebind(selection, screenshot, window, handler)
 }
 
 // Rebind 热更新：替换热键集合并通知消息线程重注册。
 // 未 Start 时只存配置；已 Start 时通过 PostThreadMessage 唤醒消息线程执行注销+注册。
-func (m *Manager) Rebind(selection, screenshot, window, close string, handler func(name string)) error {
+func (m *Manager) Rebind(selection, screenshot, window string, handler func(name string)) error {
 	m.updateMu.Lock()
 	defer m.updateMu.Unlock()
-	if err := Validate(selection, screenshot, window, close); err != nil {
+	if err := Validate(selection, screenshot, window); err != nil {
 		return err
 	}
 	items := []spec{
 		{1, selection, "selection"},
 		{2, screenshot, "screenshot"},
 		{3, window, "window"},
-		{4, close, "close"},
 	}
 	m.mu.Lock()
 	m.desired = items
@@ -223,7 +222,7 @@ func (m *Manager) applyLocked() error {
 
 // unregisterLocked 注销当前已注册的热键。调用方必须已在消息线程。
 func (m *Manager) unregisterLocked() {
-	for id := 1; id <= 4; id++ {
+	for id := 1; id <= 3; id++ {
 		procUnregisterKey.Call(0, uintptr(id))
 	}
 }

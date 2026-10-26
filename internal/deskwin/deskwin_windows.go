@@ -7,7 +7,7 @@
 // 必须留在主 goroutine 上。调用方约定：
 //
 //	w, err := deskwin.Open(...)   // 主 goroutine，同步创建
-//	... 把 HTTP 服务/热键/托盘都放进 goroutine ...
+//	... 把业务任务/热键/托盘放进 goroutine ...
 //	w.Run()                       // 主 goroutine，阻塞到窗口销毁
 //
 // 其它 goroutine 通过 Show/Hide/Toggle/Navigate/Eval 操作窗口（内部 Dispatch）。
@@ -30,7 +30,7 @@ import (
 // Settings 窗口初始参数
 type Settings struct {
 	Title  string
-	URL    string // 首页地址，例如 http://127.0.0.1:8765/
+	URL    string // 本地界面文件地址；也可在绑定原生调用后再 Navigate。
 	Width  int
 	Height int
 	Debug  bool
@@ -183,7 +183,7 @@ func defaultDataPath() string {
 }
 
 // Open 同步创建窗口（必须在主 goroutine 调用）。创建失败返回 ErrUnavailable，
-// 调用方应回退到浏览器模式。返回后需由同一 goroutine 调 Run()。
+// 不可用时由调用方报告错误。返回后需由同一 goroutine 调 Run()。
 func Open(s Settings) (w *Win, err error) {
 	previous, _, _ := procGetForegroundWindow.Call()
 	// go-webview2 在 controller 回调为 nil 时直接解引用崩溃（chromium.go:190）。
@@ -278,6 +278,10 @@ func (w *Win) Eval(js string) {
 	}
 	w.wv.Dispatch(func() { w.wv.Eval(js) })
 }
+
+// Bind and Init are configured on the window thread before loading the local page.
+func (w *Win) Bind(name string, fn any) error { return w.wv.Bind(name, fn) }
+func (w *Win) Init(js string)                 { w.wv.Init(js) }
 
 // Show 把窗口显示出来并提到前面（最小化则先还原）
 func (w *Win) Show() {
@@ -412,7 +416,7 @@ func (w *Win) SetTitle(title string) {
 }
 
 // ActivateExisting 二次启动时唤醒已运行实例的窗口（按标题找窗口）。
-// 返回 false 表示没找到（可能已被隐藏到托盘或标题不同），调用方回退到浏览器。
+// 返回 false 表示未找到对应桌面窗口。
 func ActivateExisting(title string) bool {
 	p, err := windows.UTF16PtrFromString(title)
 	if err != nil {

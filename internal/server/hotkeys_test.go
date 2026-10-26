@@ -11,14 +11,14 @@ import (
 )
 
 func TestSettingsRejectsInvalidOrConflictingWindowHotkey(t *testing.T) {
-	for _, window := range []string{"-", "alt+1", "ALT+Q", "ctrl+alt+s"} {
+	for _, window := range []string{"-", "ALT+Q", "ctrl+alt+s"} {
 		t.Run(window, func(t *testing.T) {
 			t.Setenv("ZSHSTRANS_CONFIG", filepath.Join(t.TempDir(), "config.json"))
 			cfg := config.Default()
 			cfg.Providers = []config.Provider{{ID: "offline"}}
 			app := &App{store: config.NewStore(cfg), bus: newBus()}
 			s := New(app, nil)
-			body := `{"hotkeys":{"selection":"alt+q","screenshot":"ctrl+alt+s","window":"` + window + `","close":"alt+1"}}`
+			body := `{"hotkeys":{"selection":"alt+q","screenshot":"ctrl+alt+s","window":"` + window + `"}}`
 			r := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/settings", strings.NewReader(body))
 			r.RemoteAddr = "127.0.0.1:12345"
 			r.Header.Set("Content-Type", "application/json")

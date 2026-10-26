@@ -114,6 +114,7 @@ func (s *Server) routes() {
 
 	// 原生能力：划词翻译 / 截图取词 / 热键事件流
 	s.mux.HandleFunc("/api/selection", s.adminOnly(s.handleSelection))
+	s.mux.HandleFunc("/api/clipboard", s.adminOnly(s.handleClipboard))
 	s.mux.HandleFunc("/api/capture", s.adminOnly(s.handleCapture))
 	s.mux.HandleFunc("/api/events", s.adminOnly(s.handleEvents))
 
@@ -250,7 +251,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"tgt":          cfg.TgtLang,
 		"default":      cfg.DefaultProvider,
 		"cache":        s.app.Engine().Len(),
-		"lan":          LanIP(),
 		"desktop":      s.app.windower() != nil,
 		"update_check": cfg.UpdateCheck,
 		"local":        localRequest(r),
@@ -344,7 +344,6 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"default_provider": cfg.DefaultProvider,
 		"ocr_model":        cfg.OCRModel,
 		"hotkeys":          cfg.Hotkeys,
-		"web":              cfg.Web,
 		"providers":        cfg.Providers,
 		"api_keys":         maskedKeys(cfg.APIKeys),
 		"key_saved":        KeySaved,
@@ -365,7 +364,6 @@ type settingsRequest struct {
 	DefaultProvider *string           `json:"default_provider"`
 	OCRModel        *string           `json:"ocr_model"`
 	Hotkeys         *config.Hotkeys   `json:"hotkeys"`
-	Web             *config.Web       `json:"web"`
 	Providers       []config.Provider `json:"providers"`
 	APIKeys         map[string]string `json:"api_keys"`
 	UpdateCheck     *bool             `json:"update_check"`
@@ -415,9 +413,6 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Hotkeys != nil {
 			c.Hotkeys = *req.Hotkeys
-		}
-		if req.Web != nil {
-			c.Web = *req.Web
 		}
 		if req.UpdateCheck != nil {
 			c.UpdateCheck = *req.UpdateCheck

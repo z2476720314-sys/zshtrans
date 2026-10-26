@@ -31,6 +31,23 @@ func TestNativeCallbackCopiesBorrowedMemory(t *testing.T) {
 	}
 }
 
+func TestNativeCallbackReadsSigned32BitPayloadSize(t *testing.T) {
+	s := &ipcSession{events: make(chan nativeEvent, 2)}
+	command := append([]byte("onScreenShotRequestTranslate"), 0)
+	payload := []byte("image.png")
+	// The native ABI defines size as int; the upper half of its x64 slot is unspecified.
+	size := uint64(0xa5a5a5a500000000) | uint64(len(payload))
+	s.onMessage(0, uintptr(unsafe.Pointer(&command[0])), 0, uintptr(unsafe.Pointer(&payload[0])), uintptr(size))
+	event := <-s.events
+	if event.Name != "onScreenShotRequestTranslate" || string(event.Payload) != "image.png" {
+		t.Fatalf("valid native int size was rejected: %+v", event)
+	}
+	s.onMessage(0, uintptr(unsafe.Pointer(&command[0])), 0, 0, uintptr(uint32(0xffffffff)))
+	if (<-s.events).Name != "IPC_PAYLOAD_ERROR" {
+		t.Fatal("negative native int size was accepted")
+	}
+}
+
 func TestSendInputUsesWindowsABI(t *testing.T) {
 	if unsafe.Sizeof(uintptr(0)) == 8 && (unsafe.Sizeof(nativeInput{}) != 40 || unsafe.Offsetof(nativeInput{}.Data) != 8) {
 		t.Fatal("SendInput requires a 40-byte aligned INPUT structure on x64")

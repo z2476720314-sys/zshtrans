@@ -14,7 +14,7 @@ import (
 
 // Event 服务端推送事件（供前端 EventSource 订阅）
 type Event struct {
-	Kind string `json:"kind"` // ready | popup | toggle | close | log
+	Kind string `json:"kind"` // ready | popup | toggle | log
 	Data any    `json:"data,omitempty"`
 }
 
@@ -150,15 +150,6 @@ func toggleWindow(app *App) {
 	app.Publish(Event{Kind: "toggle"})
 }
 
-// hideWindow 隐藏到托盘：有桌面窗口就隐藏真窗口，否则退回 SSE
-func hideWindow(app *App) {
-	if w := app.windower(); w != nil && w.Available() {
-		w.Hide()
-		return
-	}
-	app.Publish(Event{Kind: "close"})
-}
-
 // FireHotkey 全局热键回调：把动作转成 SSE 事件（无前端订阅时也照常执行翻译）
 func FireHotkey(app *App, name string) {
 	switch name {
@@ -190,7 +181,5 @@ func FireHotkey(app *App, name string) {
 		}()
 	case "window":
 		toggleWindow(app)
-	case "close":
-		hideWindow(app)
 	}
 }

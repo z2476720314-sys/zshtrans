@@ -8,9 +8,9 @@ type Result struct {
 
 type popupRect struct{ left, top, right, bottom int }
 
-func resultWindowRect(x, y, scale int, work popupRect) popupRect {
-	width, height := min(440*scale/100, work.right-work.left), min(370*scale/100, work.bottom-work.top)
-	x = max(work.left, min(x+18*scale/100, work.right-width))
+func resultWindowRect(x, y, scale, contentHeight int, work popupRect) popupRect {
+	width, height := min(440*scale/100, max(1, work.right-work.left-24*scale/100)), min(contentHeight, work.bottom-work.top)
+	x = max(work.left, min(x+14*scale/100, work.right-width))
 	y = max(work.top, min(y+18*scale/100, work.bottom-height))
 	return popupRect{x, y, x + width, y + height}
 }

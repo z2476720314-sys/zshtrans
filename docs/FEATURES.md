@@ -1,4 +1,4 @@
-# ZSH TRANS v3.4.1 功能清单（重构验收基线）
+# ZSH TRANS v3.5.0 功能清单（重构验收基线）
 
 > 来源：`translate/translate_tool_core.pyc`（v1.1 核心，反编译字节码）+ `translate/translate.py`（v2.38 外壳）。
 > 保留原功能逐项基线。下表的“已实现”指源码中已有对应入口或行为；最后一列说明本轮验证边界，不代表真实桌面、所有提供方与全部业务样本均已验收。原始行号对应 v2.38 源码，后续移动不改变功能编号。
@@ -88,18 +88,18 @@
 | 6.6 | 候选集生成 `_ocr_candidates`（原图/二值/放大） | pyc | 已实现：`ocr.Candidates()` | 候选 / 缓存回归；线上仅两张合成图 |
 | 6.7 | OCR 结果缓存 | pyc `_OCR_CACHE` | 已实现：`ocr` 缓存按模型、配置和代次隔离；设置变更清理 | 候选 / 缓存回归；线上仅两张合成图 |
 
-## 7. HTTP 服务（原自带 Web 界面）
+## 7. 桌面通信（保留原接口契约，移除网络监听）
 
 | # | 功能 | 原始 | Go | 本轮验证边界 |
 |---|------|------|-----|---|
-| 7.1 | HTTP 界面服务与可配置端口 | pyc `start_web` | 已实现：`internal/server`；桌面固定回环，显式 `-web` 才采用 Web 监听配置 | 接口 / 来源校验回归；未做 LAN 设备实测 |
-| 7.2 | `GET /` `GET /index.html` → 内置 HTML | pyc `do_GET` | 已实现：`server` 静态资源 | 接口 / 来源校验回归；未做 LAN 设备实测 |
+| 7.1 | HTTP 界面服务与可配置端口 | pyc `start_web` | 按用户要求删除网络监听与浏览器模式，改为 WebView2 进程内调用现有业务处理 | 原生通信回归与安装后进程监听检查 |
+| 7.2 | 内置 HTML / JS / CSS | pyc `do_GET` | EXE 内嵌资源生成本地自包含页面，无资源服务端口 | 本地资源回归与实际桌面加载 |
 | 7.3 | `GET /api/status` → `{providers:[{name,healthy}]}` | pyc:1154 | 已实现：`server` `handleStatus` | 接口 / 来源校验回归；未做 LAN 设备实测 |
 | 7.4 | `POST /api/translate` `{text,src,tgt}` → `{text,provider,ms,src}` | pyc:1176 | 已实现：`server` `handleTranslate` | 接口 / 来源校验回归；未做 LAN 设备实测 |
 | 7.5 | 语言白名单校验，越界 400 `bad lang` | pyc:1172 | 已实现：`server`。**有意扩展**：原 pyc 只认 `src∈{auto,ru,en,zh}` / `tgt∈{ru,en,zh}`（内置网页仅 3 语种）；桌面端按 `LANGUAGES` 16 种放开，否则 ja/ko/fr… 一律 400 | 接口 / 来源校验回归；未做 LAN 设备实测 |
 | 7.6 | 空文本 → 400 `empty text` | pyc:1170 | 已实现：`server` | 接口 / 来源校验回归；未做 LAN 设备实测 |
 | 7.7 | 未知路由 → 404 `{error:"not found"}` | pyc:1158 | 已实现：`server` | 接口 / 来源校验回归；未做 LAN 设备实测 |
-| 7.8 | 局域网 IP 探测 `lan_ip` | pyc `lan_ip` | 已实现：`server.LanIP()` | 接口 / 来源校验回归；未做 LAN 设备实测 |
+| 7.8 | 局域网 IP 探测 `lan_ip` | pyc `lan_ip` | 桌面启动不再使用或展示，无局域网共享入口 | EXE 与子进程无监听端口 |
 | 7.9 | 静默日志 `log_message`（不刷屏） | pyc | 已实现：`logx` | 接口 / 来源校验回归；未做 LAN 设备实测 |
 
 ## 8. 多模型提供方体系（`translate.py`）
@@ -142,7 +142,7 @@
 
 | # | 功能 | 原始 | Go | 本轮验证边界 |
 |---|------|------|-----|---|
-| 10.1 | 划词、截图、主窗显隐、隐藏到托盘四个热键 | 原 Qt 运行时与配置 | 已实现：`hotkeys.Manager.Bind()` / `Rebind()` | 受控 Win32 测试；真实按键未复验 |
+| 10.1 | 划词、截图、主窗显隐三个热键 | 原 Qt 运行时与配置 | 独立隐藏到托盘热键按用户要求删除，显隐使用同一个快捷键 | Win32 注册与恢复回归；桌面实际显隐检查 |
 | 10.2 | 组合键解析 `parse_native_hotkey`（ctrl/alt/shift/win + 键名） | :3744 | 已实现：`hotkeys.Parse()` | 受控 Win32 测试；真实按键未复验 |
 | 10.3 | `RegisterHotKey` 注册 + 消息循环 | :3790 | 已实现：`hotkeys.Manager` | 受控 Win32 测试；真实按键未复验 |
 | 10.4 | 冲突检测（同一组合重复） | :2446 | 已实现：`hotkeys.Validate()` | 受控 Win32 测试；真实按键未复验 |

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { isDesktop } from './api'
 
 /** SSE 事件类型，与 Go 端 server.Event 对应 */
 export type ServerEvent = {
-  kind: 'ready' | 'popup' | 'toggle' | 'close' | 'log'
+  kind: 'ready' | 'popup' | 'toggle' | 'log'
   data?: unknown
 }
 
@@ -14,6 +15,12 @@ export function useEvents(onEvent: (ev: ServerEvent) => void, enabled = true) {
 
   useEffect(() => {
     if (!enabled) return
+    if (isDesktop()) {
+      const receive = (event: Event) => cbRef.current((event as CustomEvent<ServerEvent>).detail)
+      window.addEventListener('zsh-event', receive)
+      setOnline(true)
+      return () => { window.removeEventListener('zsh-event', receive); setOnline(false) }
+    }
     let es: EventSource | null = null
     let closed = false
     let retry = 0

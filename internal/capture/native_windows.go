@@ -197,10 +197,12 @@ func (s *ipcSession) onMessage(generation uintptr, command uintptr, _ uintptr, p
 		name = string(buf)
 	}
 	event := nativeEvent{Name: name}
-	if size > 32768 || (size != 0 && payload == 0) {
+	// QQ's callback length is a signed C int, not a pointer-sized value.
+	length := int32(size)
+	if length < 0 || length > 32768 || (length != 0 && payload == 0) {
 		event.Name = "IPC_PAYLOAD_ERROR"
-	} else if size > 0 {
-		event.Payload = append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(payload)), int(size))...)
+	} else if length > 0 {
+		event.Payload = append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(payload)), int(length))...)
 	}
 	select {
 	case s.events <- event:

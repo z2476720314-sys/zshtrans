@@ -9,14 +9,14 @@ import (
 
 func TestManagerRejectsDuplicateWindowBinding(t *testing.T) {
 	m := NewManager()
-	if err := m.Bind("ctrl+alt+shift+f17", "ctrl+alt+shift+f18", "ctrl+alt+shift+f19", "SHIFT+ALT+CTRL+F19", func(string) {}); err == nil {
-		t.Fatal("duplicate window/hide binding was accepted")
+	if err := m.Bind("ctrl+alt+shift+f17", "ctrl+alt+shift+f18", "SHIFT+ALT+CTRL+F17", func(string) {}); err == nil {
+		t.Fatal("duplicate window/selection binding was accepted")
 	}
 }
 
 func TestManagerRecoversAfterInvalidInitialBinding(t *testing.T) {
 	m := NewManager()
-	if err := m.Bind("ctrl+alt+shift+f17", "ctrl+alt+shift+f18", "-", "ctrl+alt+shift+f20", func(string) {}); err == nil {
+	if err := m.Bind("ctrl+alt+shift+f17", "ctrl+alt+shift+f18", "-", func(string) {}); err == nil {
 		t.Fatal("invalid initial binding was accepted")
 	}
 	if err := m.Start(); err != nil {
@@ -24,7 +24,7 @@ func TestManagerRecoversAfterInvalidInitialBinding(t *testing.T) {
 	}
 	t.Cleanup(m.Stop)
 	fired := make(chan string, 1)
-	if err := m.Rebind("ctrl+alt+shift+f17", "ctrl+alt+shift+f18", "ctrl+alt+shift+f19", "ctrl+alt+shift+f20", func(name string) { fired <- name }); err != nil {
+	if err := m.Rebind("ctrl+alt+shift+f17", "ctrl+alt+shift+f18", "ctrl+alt+shift+f19", func(name string) { fired <- name }); err != nil {
 		t.Fatal(err)
 	}
 	m.mu.Lock()
@@ -45,7 +45,7 @@ func TestManagerRecoversAfterInvalidInitialBinding(t *testing.T) {
 
 func TestRebindReportsWindowsRegistrationFailure(t *testing.T) {
 	owner := NewManager()
-	if err := owner.Bind("ctrl+alt+shift+f17", "ctrl+alt+shift+f18", "ctrl+alt+shift+f19", "ctrl+alt+shift+f20", func(string) {}); err != nil {
+	if err := owner.Bind("ctrl+alt+shift+f17", "ctrl+alt+shift+f18", "ctrl+alt+shift+f19", func(string) {}); err != nil {
 		t.Fatal(err)
 	}
 	if err := owner.Start(); err != nil {
@@ -57,7 +57,7 @@ func TestRebindReportsWindowsRegistrationFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(m.Stop)
-	if err := m.Rebind("ctrl+alt+shift+f17", "ctrl+alt+shift+f18", "ctrl+alt+shift+f19", "ctrl+alt+shift+f20", func(string) {}); err == nil {
+	if err := m.Rebind("ctrl+alt+shift+f17", "ctrl+alt+shift+f18", "ctrl+alt+shift+f19", func(string) {}); err == nil {
 		t.Fatal("rebind reported success although another Windows thread owns the hotkeys")
 	}
 }

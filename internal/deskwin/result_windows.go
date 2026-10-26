@@ -38,6 +38,19 @@ var (
 	resultGDI              = windows.NewLazySystemDLL("gdi32.dll")
 	resultCreateFont       = resultGDI.NewProc("CreateFontW")
 	resultDeleteObject     = resultGDI.NewProc("DeleteObject")
+	resultCreateBrush      = resultGDI.NewProc("CreateSolidBrush")
+	resultSetTextColor     = resultGDI.NewProc("SetTextColor")
+	resultSetBkColor       = resultGDI.NewProc("SetBkColor")
+	resultSelectObject     = resultGDI.NewProc("SelectObject")
+	resultGetStockObject   = resultGDI.NewProc("GetStockObject")
+	resultSetBrushColor    = resultGDI.NewProc("SetDCBrushColor")
+	resultSetPenColor      = resultGDI.NewProc("SetDCPenColor")
+	resultRoundRect        = resultGDI.NewProc("RoundRect")
+	resultDrawText         = user32.NewProc("DrawTextW")
+	resultGetDC            = user32.NewProc("GetDC")
+	resultReleaseDC        = user32.NewProc("ReleaseDC")
+	resultGetControlID     = user32.NewProc("GetDlgCtrlID")
+	resultBackground       uintptr
 	resultOpenMu           sync.Mutex
 	resultActive           atomic.Uintptr
 	resultTexts            sync.Map
@@ -69,6 +82,57 @@ type resultWindowClass struct {
 	Instance, Icon, Cursor, Background, MenuName, ClassName, SmallIcon uintptr
 }
 
+type resultDrawItem struct {
+	ControlType, ControlID, ItemID, Action, State uint32
+	Window, DC                                    uintptr
+	Rect                                          resultRect
+	Data                                          uintptr
+}
+
+const (
+	resultPaper = 0x281F1C // Same surface, text and accent as the current desktop UI.
+	resultInk   = 0xEEF3F2
+	resultMuted = 0xA0908B
+	resultGreen = 0x3CFFB8
+	resultError = 0x7A5CFF
+)
+
+func resultMeasureText(text string, width int, font uintptr) int {
+	if text == "" {
+		return 0
+	}
+	dc, _, _ := resultGetDC.Call(0)
+	defer resultReleaseDC.Call(0, dc)
+	previous, _, _ := resultSelectObject.Call(dc, font)
+	defer resultSelectObject.Call(dc, previous)
+	rect := resultRect{Right: int32(width)}
+	resultDrawText.Call(dc, uintptr(unsafe.Pointer(resultUTF16(text))), ^uintptr(0), uintptr(unsafe.Pointer(&rect)), 0x2c10)
+	return int(rect.Bottom - rect.Top)
+}
+
+func resultDrawCopy(item *resultDrawItem) {
+	brush, _, _ := resultGetStockObject.Call(18)
+	pen, _, _ := resultGetStockObject.Call(19)
+	oldBrush, _, _ := resultSelectObject.Call(item.DC, brush)
+	oldPen, _, _ := resultSelectObject.Call(item.DC, pen)
+	defer resultSelectObject.Call(item.DC, oldBrush)
+	defer resultSelectObject.Call(item.DC, oldPen)
+	background := uintptr(0x332723)
+	if item.State&1 != 0 {
+		background = 0x3D312C
+	}
+	resultSetBrushColor.Call(item.DC, background)
+	resultSetPenColor.Call(item.DC, 0x3D312C)
+	r := item.Rect
+	resultRoundRect.Call(item.DC, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right), uintptr(r.Bottom), 10, 10)
+	resultSetTextColor.Call(item.DC, resultGreen)
+	resultSetBkColor.Call(item.DC, background)
+	font, _, _ := resultSendMessage.Call(item.Window, 0x0031, 0, 0)
+	previous, _, _ := resultSelectObject.Call(item.DC, font)
+	defer resultSelectObject.Call(item.DC, previous)
+	resultDrawText.Call(item.DC, uintptr(unsafe.Pointer(resultUTF16("复制"))), ^uintptr(0), uintptr(unsafe.Pointer(&r)), 0x25)
+}
+
 // ShowResult 使用独立消息线程，主 WebView 隐藏时也能显示，且不切换前台焦点。
 func ShowResult(result Result) error {
 	resultOpenMu.Lock()
@@ -93,7 +157,8 @@ func runResult(result Result, ready chan<- error) {
 	instance, _, _ := resultGetModule.Call(0)
 	className := resultUTF16("ZSHTRANS_RESULT_POPUP")
 	resultClassOnce.Do(func() {
-		class := resultWindowClass{Proc: windows.NewCallback(resultWindowProc), Instance: instance, Background: 6, ClassName: uintptr(unsafe.Pointer(className))}
+		resultBackground, _, _ = resultCreateBrush.Call(resultPaper)
+		class := resultWindowClass{Proc: windows.NewCallback(resultWindowProc), Instance: instance, Background: resultBackground, ClassName: uintptr(unsafe.Pointer(className))}
 		class.Size = uint32(unsafe.Sizeof(class))
 		if atom, _, err := resultRegisterClass.Call(uintptr(unsafe.Pointer(&class))); atom == 0 {
 			resultClassError = fmt.Errorf("注册译文窗口失败：%v", err)
@@ -126,32 +191,49 @@ func runResult(result Result, ready chan<- error) {
 		}
 	}
 	scale := int(dpi) * 100 / 96
-	r := resultWindowRect(int(point.X), int(point.Y), scale, popupRect{int(info.Work.Left), int(info.Work.Top), int(info.Work.Right), int(info.Work.Bottom)})
-	hwnd, _, err := resultCreateWindow.Call(0x08000088, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(resultUTF16("翻译结果"))), 0x80800000, uintptr(r.left), uintptr(r.top), uintptr(r.right-r.left), uintptr(r.bottom-r.top), 0, 0, instance, 0)
+	unit := func(n int) int { return n * scale / 100 }
+	work := popupRect{int(info.Work.Left), int(info.Work.Top), int(info.Work.Right), int(info.Work.Bottom)}
+	width := min(unit(440), max(1, work.right-work.left-unit(24)))
+	font, _, _ := resultCreateFont.Call(uintptr(int32(-unit(14))), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(resultUTF16("Segoe UI"))))
+	defer resultDeleteObject.Call(font)
+	footerFont, _, _ := resultCreateFont.Call(uintptr(int32(-unit(13))), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(resultUTF16("Segoe UI"))))
+	defer resultDeleteObject.Call(footerFont)
+	pad, buttonWidth := unit(14), unit(64)
+	textWidth := max(1, width-2*pad-buttonWidth-unit(10))
+	measured := resultMeasureText(result.Text, max(1, textWidth-unit(14)), font) + unit(6)
+	textHeight := min(max(unit(36), measured), max(unit(36), (work.bottom-work.top)*55/100))
+	meta := result.Provider
+	if result.Provider != "错误" && meta != "" {
+		meta = fmt.Sprintf("%s · %d ms", meta, result.Milliseconds)
+	}
+	footerHeight := resultMeasureText(meta, max(1, width-2*pad), footerFont)
+	height := unit(12) + textHeight + unit(10)
+	if meta != "" {
+		height += unit(8) + footerHeight
+	}
+	r := resultWindowRect(int(point.X), int(point.Y), scale, height, work)
+	hwnd, _, err := resultCreateWindow.Call(0x08000088, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(resultUTF16("ZSH TRANS · 翻译结果"))), 0x80000000, uintptr(r.left), uintptr(r.top), uintptr(r.right-r.left), uintptr(r.bottom-r.top), 0, 0, instance, 0)
 	if hwnd == 0 {
 		ready <- fmt.Errorf("创建译文窗口失败：%v", err)
 		return
 	}
 	defer resultDestroyWindow.Call(hwnd)
 	defer func() { resultTexts.Delete(hwnd); resultActive.CompareAndSwap(hwnd, 0) }()
-	resultTexts.Store(hwnd, result.Text)
+	resultTexts.Store(hwnd, result)
 	resultActive.Store(hwnd)
-	unit := func(n int) int { return n * scale / 100 }
-	width, height := r.right-r.left, r.bottom-r.top
-	font, _, _ := resultCreateFont.Call(uintptr(int32(-unit(15))), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(resultUTF16("Segoe UI"))))
-	defer resultDeleteObject.Call(font)
-	child := func(class, text string, style uintptr, x, y, w, h int, id uintptr) {
+	child := func(class, text string, style uintptr, x, y, w, h int, id, controlFont uintptr) {
 		control, _, _ := resultCreateWindow.Call(0, uintptr(unsafe.Pointer(resultUTF16(class))), uintptr(unsafe.Pointer(resultUTF16(text))), 0x50000000|style, uintptr(x), uintptr(y), uintptr(w), uintptr(h), hwnd, id, instance, 0)
-		resultSendMessage.Call(control, 0x0030, font, 1)
+		resultSendMessage.Call(control, 0x0030, controlFont, 1)
 	}
-	pad := unit(14)
-	child("STATIC", fmt.Sprintf("翻译结果 · %s · %d ms", result.Provider, result.Milliseconds), 0, pad, pad, width-2*pad, unit(24), 0)
-	top := unit(45)
-	textHeight := (height - unit(110)) / 2
-	child("EDIT", result.Source, 0x200000|0x4|0x40|0x800, pad, top, width-2*pad, textHeight, 0)
-	child("EDIT", result.Text, 0x200000|0x4|0x40|0x800, pad, top+textHeight+unit(10), width-2*pad, textHeight, 0)
-	child("BUTTON", "复制译文", 0, width-unit(184), height-unit(44), unit(88), unit(30), 1)
-	child("BUTTON", "关闭", 0, width-unit(88), height-unit(44), unit(74), unit(30), 2)
+	textStyle := uintptr(0x4 | 0x40 | 0x800)
+	if measured > textHeight {
+		textStyle |= 0x200000
+	}
+	child("EDIT", result.Text, textStyle, pad, unit(12), textWidth, textHeight, 3, font)
+	child("BUTTON", "复制", 0x10000|0x0b, width-pad-buttonWidth, unit(12), buttonWidth, unit(30), 1, footerFont)
+	if meta != "" {
+		child("STATIC", meta, 0, pad, unit(12)+textHeight+unit(8), width-2*pad, footerHeight, 4, footerFont)
+	}
 	mouseHook, _, _ := resultHook.Call(14, resultMouseCallback, instance, 0)
 	keyHook, _, _ := resultHook.Call(13, resultKeyCallback, instance, 0)
 	if mouseHook != 0 {
@@ -179,6 +261,23 @@ func runResult(result Result, ready chan<- error) {
 
 func resultWindowProc(hwnd, msg, wp, lp uintptr) uintptr {
 	switch msg {
+	case 0x0133, 0x0138:
+		color := uintptr(resultInk)
+		id, _, _ := resultGetControlID.Call(lp)
+		if id == 4 {
+			color = resultMuted
+		} else if value, ok := resultTexts.Load(hwnd); ok && value.(Result).Provider == "错误" {
+			color = resultError
+		}
+		resultSetTextColor.Call(wp, color)
+		resultSetBkColor.Call(wp, resultPaper)
+		return resultBackground
+	case 0x002b:
+		item := (*resultDrawItem)(unsafe.Pointer(lp))
+		if item.ControlID == 1 {
+			resultDrawCopy(item)
+			return 1
+		}
 	case wmClose:
 		resultDestroyWindow.Call(hwnd)
 		return 0
@@ -191,9 +290,7 @@ func resultWindowProc(hwnd, msg, wp, lp uintptr) uintptr {
 		switch wp & 0xffff {
 		case 1:
 			if value, ok := resultTexts.Load(hwnd); ok {
-				if capture.WriteClipboard(value.(string)) == nil {
-					resultDestroyWindow.Call(hwnd)
-				}
+				_ = capture.WriteClipboard(value.(Result).Text)
 			}
 		case 2:
 			resultDestroyWindow.Call(hwnd)

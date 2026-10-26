@@ -111,22 +111,20 @@ type Binding struct {
 	Value string
 }
 
-// Fields 四个可编辑热键
+// Fields 三个可编辑热键
 var Fields = []Binding{
 	{Name: "selection", Label: "划词翻译", Value: ""},
 	{Name: "screenshot", Label: "截图翻译", Value: ""},
 	{Name: "window", Label: "主窗口显隐", Value: ""},
-	{Name: "close", Label: "隐藏到托盘", Value: ""},
 }
 
 // Validate 校验一组热键：非法格式 / 相互冲突
-func Validate(selection, screenshot, window, close string) error {
+func Validate(selection, screenshot, window string) error {
 	seen := map[uint64]string{}
 	for _, b := range []Binding{
 		{"selection", "划词翻译", selection},
 		{"screenshot", "截图翻译", screenshot},
 		{"window", "主窗口显隐", window},
-		{"close", "隐藏到托盘", close},
 	} {
 		combo, err := Parse(b.Value)
 		if err != nil {

@@ -1,7 +1,7 @@
 //go:build !windows
 
 // Package deskwin 非 Windows 平台的占位实现：始终返回 ErrUnavailable，
-// 由调用方回退到浏览器。真实实现见 deskwin_windows.go。
+// 不支持的平台不创建浏览器替代窗口。真实实现见 deskwin_windows.go。
 package deskwin
 
 import "errors"
@@ -45,6 +45,9 @@ func (*Win) Navigate(string) {}
 
 // Eval 占位实现
 func (*Win) Eval(string) {}
+
+func (*Win) Bind(string, any) error { return ErrUnavailable }
+func (*Win) Init(string)            {}
 
 // Show 占位实现
 func (*Win) Show() {}

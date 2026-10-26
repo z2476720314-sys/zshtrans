@@ -127,7 +127,7 @@ export default function Phrases({ onInsert }: Props) {
             <div className="ops">
               <Tooltip title="复制常用语">
                 <button className="icon-btn" aria-label="复制常用语" type="button"
-                  onClick={() => void navigator.clipboard.writeText(it.content).then(
+                  onClick={() => void api.copyText(it.content).then(
                     () => message.success('已复制'), () => message.error('复制失败，请手动选择文字'),
                   )}><CopyOutlined /></button>
               </Tooltip>

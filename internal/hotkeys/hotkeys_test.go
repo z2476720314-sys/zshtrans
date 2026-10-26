@@ -44,22 +44,22 @@ func TestParseInvalid(t *testing.T) {
 
 // TestValidateConflict 两个操作绑定同一组合键必须被拒（对应 candidate() 的热键冲突）
 func TestValidateConflict(t *testing.T) {
-	err := Validate("ctrl+alt+t", "ctrl+alt+t", "ctrl+alt+m", "ctrl+alt+q")
+	err := Validate("ctrl+alt+t", "ctrl+alt+t", "ctrl+alt+m")
 	if err == nil {
 		t.Fatal("expected conflict error for duplicated hotkey")
 	}
-	if err := Validate("ctrl+alt+t", "ctrl+alt+s", "ctrl+alt+m", "ctrl+alt+q"); err != nil {
+	if err := Validate("ctrl+alt+t", "ctrl+alt+s", "ctrl+alt+m"); err != nil {
 		t.Fatalf("distinct hotkeys should pass, got %v", err)
 	}
 	// 大小写与空格不同但语义相同的组合也算冲突
-	if err := Validate("ctrl+alt+t", "ALT+CTRL+T", "ctrl+alt+m", "ctrl+alt+q"); err == nil {
+	if err := Validate("ctrl+alt+t", "ALT+CTRL+T", "ctrl+alt+m"); err == nil {
 		t.Fatal("expected conflict for case/order-insensitive duplicate")
 	}
 }
 
 // TestValidateInvalid 非法格式的报错文案要带操作名和原值（对应 pyc 的 %s热键 %s 无效）
 func TestValidateInvalid(t *testing.T) {
-	err := Validate("bogus", "ctrl+alt+s", "ctrl+alt+m", "ctrl+alt+q")
+	err := Validate("bogus", "ctrl+alt+s", "ctrl+alt+m")
 	if err == nil {
 		t.Fatal("expected error for invalid hotkey")
 	}

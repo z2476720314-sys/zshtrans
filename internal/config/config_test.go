@@ -34,11 +34,8 @@ func TestDefaultSane(t *testing.T) {
 	if c.APIKeys.OCRSpace != "helloworld" {
 		t.Errorf("default ocrspace = %q, want helloworld", c.APIKeys.OCRSpace)
 	}
-	if !c.Web.Enabled || c.Web.Host != "127.0.0.1" || c.Web.Port != 8765 {
-		t.Errorf("default web = %+v", c.Web)
-	}
 	if c.Hotkeys.Selection != "ctrl+alt+t" || c.Hotkeys.Screenshot != "ctrl+alt+s" ||
-		c.Hotkeys.Window != "ctrl+alt+m" || c.Hotkeys.Close != "ctrl+alt+q" {
+		c.Hotkeys.Window != "ctrl+alt+m" {
 		t.Errorf("default hotkeys = %+v", c.Hotkeys)
 	}
 	if !c.UpdateCheck {

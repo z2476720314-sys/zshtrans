@@ -87,8 +87,6 @@ export default function App() {
       message.error(typeof ev.data === 'string' ? ev.data : '热键执行失败')
     } else if (ev.kind === 'toggle') {
       message.info('主窗口显隐热键已触发')
-    } else if (ev.kind === 'close') {
-      message.info('隐藏到托盘热键已触发')
     }
   }, status?.local ?? false)
 
@@ -225,7 +223,7 @@ export default function App() {
                 type="text"
                 aria-label="复制弹窗译文"
                 icon={<CopyOutlined />}
-                onClick={() => void navigator.clipboard.writeText(popup.text).then(
+                onClick={() => void api.copyText(popup.text).then(
                   () => message.success('已复制'),
                   () => message.error('复制失败'),
                 )}

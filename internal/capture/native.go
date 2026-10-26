@@ -211,8 +211,13 @@ type captureState struct {
 
 func (s *captureState) accept(event nativeEvent, now time.Time) {
 	switch event.Name {
-	case "IPC_DISCONNECTED", "IPC_PAYLOAD_ERROR":
-		s.Err = errors.New("原生截图连接中断或回调无效")
+	case "IPC_DISCONNECTED":
+		// QQ can disconnect after completion while the grace period still accepts delayed requests.
+		if s.Action == "" {
+			s.Err = errors.New("原生截图连接中断")
+		}
+	case "IPC_PAYLOAD_ERROR":
+		s.Err = errors.New("原生截图回调无效")
 	case "onScreenShotRequestTranslate", "onScreenShotRequestOCR":
 		if s.Action != "translate" && s.Action != "ocr" {
 			s.Action = "ocr"

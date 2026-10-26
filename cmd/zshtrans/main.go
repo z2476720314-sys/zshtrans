@@ -2,12 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
 	"io/fs"
-	"net"
-	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -33,93 +32,67 @@ const winTitle = "ZSH TRANS · 跨境翻译台"
 
 func main() {
 	var (
-		port    = flag.Int("port", 0, "HTTP 端口（桌面默认自动分配，-web 默认读配置）")
-		host    = flag.String("host", "", "监听地址（默认读配置）")
-		noOpen  = flag.Bool("no-open", false, "不自动打开界面（只起服务）")
-		useWeb  = flag.Bool("web", false, "用默认浏览器承载界面（默认用 WebView2 桌面窗口）")
 		noHot   = flag.Bool("no-hotkeys", false, "不注册全局快捷键")
 		noTray  = flag.Bool("no-tray", false, "不显示系统托盘图标")
-		noInst  = flag.Bool("no-single", false, "允许多开（不启用单实例保护）")
+		noInst  = flag.Bool("no-single", false, "允许多开")
 		conOut  = flag.Bool("console", false, "日志同时输出到控制台")
-		wvDebug = flag.Bool("wv-debug", false, "WebView2 调试模式（开 DevTools）")
+		wvDebug = flag.Bool("wv-debug", false, "WebView2 调试模式")
 	)
 	flag.Parse()
-
-	// 发布版用 -H windowsgui 链接（双击不弹黑框），代价是进程没有控制台。
-	// -console 是排障手段，这里按需现挂一个，别让文档里的用法失效。
 	if *conOut {
 		console.Attach()
 		logx.EnableConsole()
 	}
-
 	logx.Init(config.LogPath())
 	defer logx.Close()
 	logx.Info("%s %s starting, base=%s", config.AppName, config.AppVersion, config.BaseDir())
 
-	// ---------- 单实例 ----------
-	var lock instance.Lock
 	if !*noInst {
-		l, err := instance.Acquire("Global\\ZSHTRANS_SINGLE_INSTANCE")
+		lock, err := instance.Acquire("Global\\ZSHTRANS_SINGLE_INSTANCE")
 		if errors.Is(err, instance.ErrAlreadyRunning) {
-			cfg, _ := config.Load()
-			p := cfg.Web.Port
-			if p == 0 {
-				p = 8765
+			if !deskwin.ActivateExisting(winTitle) {
+				deskwin.ShowError("程序已在运行，请从托盘打开主窗口。")
 			}
-			if *port > 0 {
-				p = *port
-			}
-			url := fmt.Sprintf("http://127.0.0.1:%d/", p)
-			logx.Info("another instance running, activating")
-			// 正常桌面模式只唤醒已有窗口；浏览器仅用于显式 -web 调试。
-			activated := false
-			if !*useWeb && !*noOpen {
-				activated = deskwin.ActivateExisting(winTitle)
-			}
-			if !activated && *useWeb && !*noOpen {
-				openBrowser(url)
-			}
-			if !activated && !*useWeb && !*noOpen {
-				fmt.Fprintf(os.Stderr, "%s 已在运行，请从托盘打开主窗口\n", config.AppName)
-				return
-			}
-			fmt.Printf("%s 已在运行，已唤起\n", config.AppName)
 			return
 		}
 		if err != nil {
 			logx.Warn("single instance unavailable: %v", err)
 		} else {
-			lock = l
 			defer lock.Release()
 		}
 	}
-
 	if err := config.MigrateLegacy(); err != nil {
 		logx.Err("legacy profile migration failed: %v", err)
-		fmt.Fprintln(os.Stderr, err)
+		deskwin.ShowError("无法导入旧版配置：" + err.Error())
 		return
 	}
 	phrases.Init(config.PhrasesPath())
 	phrases.Seed()
-
 	app := server.NewApp()
 	cfg := app.Config()
-
-	listenHost := cfg.Web.Host
-	if !*useWeb {
-		listenHost = "127.0.0.1"
-	}
-	if *host != "" {
-		listenHost = *host
-	}
-
 	asset, err := fs.Sub(web.Dist, "dist")
 	if err != nil {
-		logx.Err("embed asset fail: %v", err)
-		os.Exit(1)
+		deskwin.ShowError("界面资源不可用：" + err.Error())
+		return
 	}
-
+	pagePath, err := web.WriteDesktopPage(asset, filepath.Join(config.BaseDir(), "UI"))
+	if err != nil {
+		deskwin.ShowError("无法准备桌面界面：" + err.Error())
+		return
+	}
+	pageURL := (&url.URL{Scheme: "file", Path: "/" + filepath.ToSlash(pagePath)}).String()
+	win, err := deskwin.Open(deskwin.Settings{
+		DataPath: filepath.Join(config.BaseDir(), "WebView2"), Title: winTitle,
+		Width: 1180, Height: 820, Debug: *wvDebug,
+	})
+	if err != nil {
+		logx.Err("webview2 unavailable: %v", err)
+		deskwin.ShowError("无法创建桌面窗口。请安装或修复 Microsoft Edge WebView2 Runtime 后重试。\n\n" + err.Error())
+		return
+	}
+	logx.Info("desktop window created (hwnd=%#x), in-process transport, no TCP listener", win.HWND())
 	srv := server.New(app, asset)
+	srv.SetWindower(win)
 	srv.SetResultHook(func(result server.Result) {
 		if err := deskwin.ShowResult(deskwin.Result{Source: result.Source, Text: result.Text, Provider: result.Provider, Milliseconds: int64(result.MS)}); err != nil {
 			logx.Warn("result popup unavailable: %v", err)
@@ -127,162 +100,75 @@ func main() {
 	})
 	defer deskwin.CloseResult()
 	defer capture.CloseInteractive()
-	ln, err := openAppListener(listenHost, cfg.Web.Port, *port, *useWeb)
-	if err != nil {
-		logx.Err("listen fail: %v", err)
-		if !*useWeb && !*noOpen {
-			deskwin.ShowError("无法启动本机界面服务：\n\n" + err.Error())
+	emit := func(name string, value any) {
+		if !win.Available() {
+			return
 		}
-		fmt.Fprintln(os.Stderr, err)
+		raw, err := json.Marshal(value)
+		if err == nil {
+			win.Eval("window.dispatchEvent(new CustomEvent('" + name + "',{detail:" + string(raw) + "}))")
+		}
+	}
+	bridge := server.NewDesktopBridge(srv.Handler(), func(response server.DesktopResponse) { emit("zsh-response", response) })
+	defer bridge.Close()
+	if err := win.Bind("_zshRequest", bridge.Request); err != nil {
+		deskwin.ShowError("桌面通信初始化失败：" + err.Error())
 		return
 	}
-	addr := ln.Addr().String()
-	listenPort := ln.Addr().(*net.TCPAddr).Port
-	httpSrv := &http.Server{
-		Addr:              addr,
-		Handler:           srv.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		// 慢速攻击（slowloris）防护：只有 ReadHeaderTimeout 时，body 可以无限慢地传。
-		// 60s 足够覆盖 OCR 大图上传（24MB 上限），也比零值安全得多。
-		ReadTimeout: 60 * time.Second,
-		// SSE 长连接要保持，IdleTimeout 只影响 keep-alive 之间的空转
-		IdleTimeout: 120 * time.Second,
+	if err := win.Bind("_zshCancel", bridge.Cancel); err != nil {
+		deskwin.ShowError("桌面通信初始化失败：" + err.Error())
+		return
 	}
-
-	logx.Info("http listening on %s", addr)
-
-	localURL := fmt.Sprintf("http://127.0.0.1:%d/", listenPort)
-	lanURL := fmt.Sprintf("http://%s:%d/", server.LanIP(), listenPort)
+	win.Init(web.DesktopScript(pageURL, bridge.Token()))
+	win.Navigate(pageURL)
+	ctx, cancelRuntime := context.WithCancel(context.Background())
+	defer cancelRuntime()
+	go srv.DesktopEvents(ctx, func(event server.Event) { emit("zsh-event", event) })
 	if *conOut {
 		go tailLog()
 	}
 
-	// ---------- 桌面窗口（必须在主 goroutine 创建，见 deskwin 包注释） ----------
-	var win *deskwin.Win
-	if !*useWeb && !*noOpen {
-		w, wErr := deskwin.Open(deskwin.Settings{
-			DataPath: filepath.Join(config.BaseDir(), "WebView2"),
-			Title:    winTitle,
-			URL:      localURL,
-			Width:    1180,
-			Height:   820,
-			Debug:    *wvDebug,
-		})
-		if wErr != nil {
-			logx.Err("webview2 unavailable: %v", wErr)
-			deskwin.ShowError("无法创建桌面窗口。请安装或修复 Microsoft Edge WebView2 Runtime 后重试。\n\n" + wErr.Error())
-			_ = ln.Close()
-			os.Exit(1)
-		} else {
-			win = w
-			srv.SetWindower(win)
-			logx.Info("desktop window created (hwnd=%#x)", win.HWND())
-		}
-	}
-
-	fmt.Printf("%s %s\n  本机: %s\n  局域网: %s\n", config.AppName, config.AppVersion, localURL, lanURL)
-
-	go func() {
-		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logx.Err("http serve fail: %v", err)
-		}
-	}()
-
-	// ---------- 全局快捷键 ----------
-	// 注意：RegisterHotKey(hWnd=0) 把热键绑到「调用线程」的消息队列，
-	// 所以注册和泵消息必须在同一个线程。Start() 内部先 LockOSThread 再注册。
 	var mgr *hotkeys.Manager
 	if !*noHot {
 		mgr = hotkeys.NewManager()
-		handler := func(name string) {
-			logx.Info("hotkey fired: %s", name)
-			server.FireHotkey(app, name)
-		}
-		bindErr := mgr.Bind(cfg.Hotkeys.Selection, cfg.Hotkeys.Screenshot, cfg.Hotkeys.Window, cfg.Hotkeys.Close, handler)
+		handler := func(name string) { logx.Info("hotkey fired: %s", name); server.FireHotkey(app, name) }
+		bindErr := mgr.Bind(cfg.Hotkeys.Selection, cfg.Hotkeys.Screenshot, cfg.Hotkeys.Window, handler)
 		if bindErr != nil {
 			logx.Warn("hotkey format invalid: %v", bindErr)
-			fmt.Fprintf(os.Stderr, "快捷键配置无效：%v\n", bindErr)
 		}
-		// 即使旧配置无效也保留消息线程，设置修正后可以重新注册。
 		if err := mgr.Start(); err != nil {
-			// 注册失败（被占用）时消息循环仍在跑，改设置里的键位即可热更新生效
 			logx.Warn("hotkeys unavailable: %v", err)
-			fmt.Fprintf(os.Stderr, "快捷键未生效：%v\n", err)
 		} else if bindErr == nil {
 			logx.Info("hotkeys registered")
 		}
-		// 设置页保存后热更新热键（原来只换 cfg 不重建，改了键位要重启才生效）
 		srv.SetHotkeyHook(func(h config.Hotkeys) error {
-			if mgr == nil {
-				return errors.New("全局快捷键已禁用（-no-hotkeys）")
-			}
-			return mgr.Rebind(h.Selection, h.Screenshot, h.Window, h.Close, handler)
+			return mgr.Rebind(h.Selection, h.Screenshot, h.Window, handler)
 		})
+	} else {
+		srv.SetHotkeyHook(func(config.Hotkeys) error { return errors.New("全局快捷键已禁用（-no-hotkeys）") })
 	}
-
-	// 浏览器只作为显式要求的开发审查入口。
-	if *useWeb && !*noOpen {
-		openBrowser(localURL)
-	}
-
-	// 自更新换版后退出：批处理会等进程退掉再覆盖 exe
-	srv.SetExitHook(func() { requestExit() })
-
-	// ---------- 系统托盘 ----------
-	showUI := func(hash string) {
-		if win != nil {
-			if hash != "" {
-				win.Navigate(localURL + hash)
-			}
-			win.Show()
-			return
-		}
-		if *useWeb {
-			openBrowser(localURL + hash)
-		}
-	}
-
+	srv.SetExitHook(requestExit)
 	if !*noTray {
 		go func() {
-			err := tray.Run(assets.Icon, tray.Actions{
-				Show:     func() { showUI("") },
-				Settings: func() { showUI("#settings") },
+			if err := tray.Run(assets.Icon, tray.Actions{
+				Show:     win.Show,
+				Settings: func() { win.Eval("location.hash = '#settings'"); win.Show() },
 				Capture:  func() { server.FireHotkey(app, "screenshot") },
-				Quit:     func() { requestExit() },
-			})
-			if err != nil {
+				Quit:     requestExit,
+			}); err != nil {
 				logx.Warn("tray unavailable: %v", err)
 			}
 		}()
 	}
-
-	// ---------- 信号 / 退出 ----------
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		logx.Info("shutdown signal received")
-		if win != nil {
-			win.Close()
-			return
-		}
-		requestExit()
-	}()
-
-	if win != nil {
-		// 主 goroutine 进消息循环；窗口销毁后返回
-		win.Run()
-		logx.Info("desktop window closed")
-	} else {
-		<-sigCh
-	}
-
-	// ---------- 收尾 ----------
+	defer signal.Stop(sigCh)
+	go func() { <-sigCh; cancelRuntime(); bridge.Close(); win.Close() }()
+	win.Run()
+	cancelRuntime()
+	bridge.Close()
 	if mgr != nil {
 		mgr.Stop()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	_ = httpSrv.Shutdown(ctx)
 	logx.Info("bye")
 }
 

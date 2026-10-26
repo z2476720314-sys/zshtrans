@@ -39,7 +39,7 @@ func onReady() {
 		}
 	})
 
-	mShow := systray.AddMenuItem("显示主窗口", "在浏览器中打开翻译台")
+	mShow := systray.AddMenuItem("显示主窗口", "显示桌面翻译窗口")
 	mCapture := systray.AddMenuItem("截图翻译", "全屏截图 → OCR → 翻译")
 	mSettings := systray.AddMenuItem("设置", "打开设置页")
 	systray.AddSeparator()

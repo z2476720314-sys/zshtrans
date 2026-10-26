@@ -9,13 +9,4 @@ export default defineConfig({
     emptyOutDir: true,
     chunkSizeWarningLimit: 1200,
   },
-  server: {
-    port: 5273,
-    proxy: {
-      '/api': {
-        target: process.env.ZSHTRANS_DEV_BACKEND || 'http://127.0.0.1:8765',
-        changeOrigin: false,
-      },
-    },
-  },
 })

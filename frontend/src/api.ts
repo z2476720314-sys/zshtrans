@@ -12,7 +12,6 @@ export type Status = {
   tgt: string
   default: string
   cache: number
-  lan: string
   desktop: boolean
   update_check: boolean
   local: boolean
@@ -72,10 +71,7 @@ export type Hotkeys = {
   selection: string
   screenshot: string
   window: string
-  close: string
 }
-
-export type WebCfg = { enabled: boolean; host: string; port: number }
 
 export type Config = {
   app: string
@@ -85,7 +81,6 @@ export type Config = {
   default_provider: string
   ocr_model: string
   hotkeys: Hotkeys
-  web: WebCfg
   providers: Provider[]
   api_keys: Record<string, string>
   key_saved: string
@@ -156,8 +151,47 @@ export type UpdateProgress = {
 
 export class ApiError extends Error {}
 
+declare global {
+  interface Window {
+    zshDesktop?: {
+      request(id: string, method: string, path: string, body: string): Promise<void>
+      cancel(id: string): Promise<void>
+    }
+  }
+}
+
+export const isDesktop = () => typeof window !== 'undefined' && !!window.zshDesktop
+let nextRequest = 0
+const requestSession = crypto.getRandomValues(new Uint32Array(4)).join('-')
+
+function nativeFetch(path: string, init?: RequestInit): Promise<Response> {
+  const bridge = window.zshDesktop!
+  const id = `${requestSession}-${++nextRequest}`
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      window.removeEventListener('zsh-response', receive)
+      init?.signal?.removeEventListener('abort', abort)
+    }
+    const fail = (error: unknown) => { cleanup(); reject(error) }
+    const receive = (event: Event) => {
+      const response = (event as CustomEvent<{ id: string; status: number; body: string }>).detail
+      if (response.id !== id) return
+      cleanup()
+      resolve(new Response(response.body, { status: response.status }))
+    }
+    const abort = () => {
+      fail(new DOMException('请求已取消', 'AbortError'))
+      void bridge.cancel(id).catch(() => {})
+    }
+    if (init?.signal?.aborted) { reject(new DOMException('请求已取消', 'AbortError')); return }
+    window.addEventListener('zsh-response', receive)
+    init?.signal?.addEventListener('abort', abort, { once: true })
+    void bridge.request(id, init?.method ?? 'GET', path, String(init?.body ?? '')).catch(fail)
+  })
+}
+
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
+  const res = await (isDesktop() ? nativeFetch : fetch)(path, {
     headers: { 'Content-Type': 'application/json' },
     ...init,
   })
@@ -181,6 +215,9 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  copyText: (text: string) => isDesktop()
+    ? call('/api/clipboard', { method: 'POST', body: JSON.stringify({ text }) }).then(() => {})
+    : navigator.clipboard.writeText(text),
   status: () => call<Status>('/api/status'),
   translate: (text: string, src: string, tgt: string, signal?: AbortSignal) =>
     call<TranslateResult>('/api/translate', {

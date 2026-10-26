@@ -12,25 +12,17 @@ import (
 
 const (
 	AppName    = "ZSH TRANS"
-	AppVersion = "v3.4.3"
+	AppVersion = "v3.5.0"
 	// 原 pyc 常量
 	Timeout  = 8
 	CacheMax = 300
 )
 
-// Hotkeys 四个全局热键（window = 显隐，close = 隐藏到托盘）
+// Hotkeys 三个全局热键，window 同时负责隐藏与恢复。
 type Hotkeys struct {
 	Selection  string `json:"selection"`
 	Screenshot string `json:"screenshot"`
 	Window     string `json:"window"`
-	Close      string `json:"close"`
-}
-
-// Web 内置 HTTP 服务
-type Web struct {
-	Enabled bool   `json:"enabled"`
-	Host    string `json:"host"`
-	Port    int    `json:"port"`
 }
 
 // APIKeys 直连翻译接口与 OCR 的密钥
@@ -93,7 +85,6 @@ type Config struct {
 	TgtLang         string     `json:"tgt_lang"`
 	DefaultProvider string     `json:"default_provider"`
 	OCRModel        string     `json:"ocr_model"`
-	Web             Web        `json:"web"`
 	APIKeys         APIKeys    `json:"api_keys"`
 	Providers       []Provider `json:"providers"`
 	// 自更新
@@ -111,12 +102,10 @@ func Default() Config {
 			Selection:  "ctrl+alt+t",
 			Screenshot: "ctrl+alt+s",
 			Window:     "ctrl+alt+m",
-			Close:      "ctrl+alt+q",
 		},
 		SrcLang:         "auto",
 		TgtLang:         "zh",
 		DefaultProvider: "",
-		Web:             Web{Enabled: true, Host: "127.0.0.1", Port: 8765},
 		APIKeys:         APIKeys{OCRSpace: "helloworld"},
 		UpdateCheck:     true,
 		UpdateRepo:      "z2476720314-sys/zshtrans",
@@ -301,15 +290,6 @@ func normalize(cfg, def Config) Config {
 	}
 	if cfg.Hotkeys.Window == "" {
 		cfg.Hotkeys.Window = def.Hotkeys.Window
-	}
-	if cfg.Hotkeys.Close == "" {
-		cfg.Hotkeys.Close = def.Hotkeys.Close
-	}
-	if cfg.Web.Host == "" {
-		cfg.Web.Host = def.Web.Host
-	}
-	if cfg.Web.Port == 0 {
-		cfg.Web.Port = def.Web.Port
 	}
 	// 原 install_language_support：src==tgt 时把 src 拉回 auto
 	if cfg.SrcLang == cfg.TgtLang {

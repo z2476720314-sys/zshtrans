@@ -147,7 +147,7 @@ export default function Translate({ active, localAccess, initialDirection, langu
   const copy = async () => {
     if (!out) return
     try {
-      await navigator.clipboard.writeText(out)
+      await api.copyText(out)
       message.success('译文已复制')
     } catch {
       message.error('复制失败，请手动选择')

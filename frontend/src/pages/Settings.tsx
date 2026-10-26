@@ -58,7 +58,6 @@ const HOTKEY_FIELDS: { key: keyof Hotkeys; label: string }[] = [
   { key: 'selection', label: '划词翻译' },
   { key: 'screenshot', label: '截图翻译' },
   { key: 'window', label: '主窗口显隐' },
-  { key: 'close', label: '隐藏到托盘' },
 ]
 
 type Props = { onSaved: () => void }
@@ -249,7 +248,6 @@ export default function Settings({ onSaved }: Props) {
         default_provider: cfg.default_provider,
         ocr_model: cfg.ocr_model,
         hotkeys,
-        web: cfg.web,
         providers,
         api_keys: keys,
         update_check: cfg.update_check,
@@ -631,7 +629,7 @@ export default function Settings({ onSaved }: Props) {
                 </div>
               ))}
               <div className="hint">
-                组合键用 + 连接，修饰键写在前（ctrl / alt / shift / win）。留空表示不注册该热键。
+                组合键用 + 连接，修饰键写在前（ctrl / alt / shift / win）。主窗口显隐使用同一个快捷键。
               </div>
             </>
           )}

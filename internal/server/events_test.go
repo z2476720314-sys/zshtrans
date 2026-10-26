@@ -14,9 +14,8 @@ func TestBusPublishToggle(t *testing.T) {
 
 	app := &App{bus: b}
 	FireHotkey(app, "window")
-	FireHotkey(app, "close")
 
-	want := []string{"toggle", "close"}
+	want := []string{"toggle"}
 	for _, kind := range want {
 		select {
 		case ev := <-ch:
