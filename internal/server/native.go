@@ -50,7 +50,7 @@ func (s *Server) handleSelection(w http.ResponseWriter, r *http.Request) {
 		}
 		defer win.Show()
 	}
-	text, err := capture.SelectedText(1200 * time.Millisecond)
+	text, err := capture.SelectedText(1200*time.Millisecond, "")
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return

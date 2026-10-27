@@ -1,7 +1,7 @@
 {
   "name": "zshtrans-ui",
   "private": true,
-  "version": "3.5.0",
+  "version": "3.5.1",
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.mjs",

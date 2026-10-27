@@ -13,22 +13,22 @@
     "#1": {
       "0409": {
         "fixed": {
-          "file_version": "3.5.0.0",
-          "product_version": "3.5.0.0"
+          "file_version": "3.5.1.0",
+          "product_version": "3.5.1.0"
         },
         "info": {
           "0409": {
             "Comments": "跨境翻译台 - 俄英中互译",
             "CompanyName": "ZSH",
             "FileDescription": "ZSH TRANS 跨境翻译台",
-            "FileVersion": "3.5.0.0",
+            "FileVersion": "3.5.1.0",
             "InternalName": "zshtrans",
             "LegalCopyright": "Copyright (C) 2026 ZSH",
             "LegalTrademarks": "",
             "OriginalFilename": "zshtrans.exe",
             "PrivateBuild": "",
             "ProductName": "ZSH TRANS",
-            "ProductVersion": "3.5.0.0",
+            "ProductVersion": "3.5.1.0",
             "SpecialBuild": ""
           }
         }

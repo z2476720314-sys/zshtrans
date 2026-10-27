@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/local/zshtrans/internal/hotkeys"
 	"github.com/local/zshtrans/internal/logx"
 )
 
@@ -28,9 +30,10 @@ var (
 	procIsClipboardFormatAvail                 = user32.NewProc("IsClipboardFormatAvailable")
 	procEmptyClipboard         nativeProcedure = user32.NewProc("EmptyClipboard")
 	procSetClipboardData       nativeProcedure = user32.NewProc("SetClipboardData")
-	procGetAsyncKeyState                       = user32.NewProc("GetAsyncKeyState")
+	procGetAsyncKeyState       nativeProcedure = user32.NewProc("GetAsyncKeyState")
 	procKeybdEvent                             = user32.NewProc("keybd_event")
-	procSendInput                              = user32.NewProc("SendInput")
+	procSendInput              nativeProcedure = user32.NewProc("SendInput")
+	procGetForegroundWindow    nativeProcedure = user32.NewProc("GetForegroundWindow")
 	procGetSystemMetrics                       = user32.NewProc("GetSystemMetrics")
 	procGetDC                                  = user32.NewProc("GetDC")
 	procReleaseDC                              = user32.NewProc("ReleaseDC")
@@ -78,7 +81,7 @@ func ModifiersDown() (ctrl, alt, shift bool) {
 }
 
 // SendCtrlC 模拟 Ctrl+C（对应 send_ctrl_c）
-func SendCtrlC() { _ = sendCopyInput() }
+func SendCtrlC() { _ = sendCopyInput("") }
 
 type nativeMouseInput struct {
 	DX, DY            int32
@@ -96,20 +99,56 @@ type nativeInput struct {
 	Data [unsafe.Sizeof(nativeMouseInput{})]byte
 }
 
-func sendCopyInput() error {
-	inputs := make([]nativeInput, 4)
-	for i, key := range []uint16{vkControl, 'C', 'C', vkControl} {
-		inputs[i].Type = 1
-		keyboard := (*nativeKeyboardInput)(unsafe.Pointer(&inputs[i].Data[0]))
-		keyboard.VK = key
-		if i >= 2 {
-			keyboard.Flags = keyeventfKeyup
+func sendCopyInput(hotkey string) error {
+	var releaseKeys []uint16
+	if hotkey != "" {
+		combo, err := hotkeys.Parse(hotkey)
+		if err != nil {
+			return err
+		}
+		releaseKeys = append(releaseKeys, uint16(combo.Key))
+		for _, mod := range []struct {
+			flag uint32
+			key  uint16
+		}{
+			{hotkeys.ModControl, vkControl}, {hotkeys.ModShift, vkShift}, {hotkeys.ModAlt, vkMenu},
+			{hotkeys.ModWin, 0x5B}, {hotkeys.ModWin, 0x5C},
+		} {
+			if combo.Mods&mod.flag != 0 {
+				releaseKeys = append(releaseKeys, mod.key)
+			}
 		}
 	}
-	written, _, err := procSendInput.Call(uintptr(len(inputs)), uintptr(unsafe.Pointer(&inputs[0])), unsafe.Sizeof(inputs[0]))
-	if written != uintptr(len(inputs)) {
-		procSendInput.Call(2, uintptr(unsafe.Pointer(&inputs[2])), unsafe.Sizeof(inputs[0]))
-		return fmt.Errorf("SendInput copied %d/%d events: %v", written, len(inputs), err)
+	var events []nativeKeyboardInput
+	if len(releaseKeys) > 0 {
+		events = append(events, nativeKeyboardInput{VK: releaseKeys[0], Flags: keyeventfKeyup})
+	}
+	events = append(events, nativeKeyboardInput{VK: vkControl})
+	// Ctrl must be held before releasing Alt/Win, or the browser may focus its menu.
+	for i, key := range releaseKeys {
+		if i > 0 && key != vkControl {
+			events = append(events, nativeKeyboardInput{VK: key, Flags: keyeventfKeyup})
+		}
+	}
+	events = append(events, nativeKeyboardInput{VK: 'C'}, nativeKeyboardInput{VK: 'C', Flags: keyeventfKeyup}, nativeKeyboardInput{VK: vkControl, Flags: keyeventfKeyup})
+	send := func(keys []nativeKeyboardInput) (uintptr, error) {
+		inputs := make([]nativeInput, len(keys))
+		for i, event := range keys {
+			inputs[i].Type = 1
+			*(*nativeKeyboardInput)(unsafe.Pointer(&inputs[i].Data[0])) = event
+		}
+		written, _, err := procSendInput.Call(uintptr(len(inputs)), uintptr(unsafe.Pointer(&inputs[0])), unsafe.Sizeof(inputs[0]))
+		runtime.KeepAlive(inputs)
+		return written, err
+	}
+	written, err := send(events)
+	if written != uintptr(len(events)) {
+		releases := []nativeKeyboardInput{{VK: 'C', Flags: keyeventfKeyup}, {VK: vkControl, Flags: keyeventfKeyup}}
+		for _, key := range releaseKeys {
+			releases = append(releases, nativeKeyboardInput{VK: key, Flags: keyeventfKeyup})
+		}
+		_, _ = send(releases)
+		return fmt.Errorf("SendInput copied %d/%d events: %v", written, len(events), err)
 	}
 	return nil
 }
@@ -118,60 +157,103 @@ var selectionMu sync.Mutex
 
 // SelectedText 取当前选中文本（对应 capture_selected_text）
 // 不能完整快照的格式在模拟复制前拒绝；恢复不会覆盖后续用户复制。
-func SelectedText(wait time.Duration) (string, error) {
+func SelectedText(wait time.Duration, hotkey string) (string, error) {
 	if !selectionMu.TryLock() {
 		return "", errors.New("划词取词正在进行中")
 	}
 	defer selectionMu.Unlock()
-	var before clipboardSnapshot
-	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
-	defer cancel()
-	if err := copyWhenReleased(ctx, func() bool {
+	source, _, _ := procGetForegroundWindow.Call()
+	if source == 0 {
+		return "", errors.New("无法确认取词窗口，请保持文字选区后重试")
+	}
+	var trigger uint32
+	if hotkey != "" {
+		combo, err := hotkeys.Parse(hotkey)
+		if err != nil {
+			return "", err
+		}
+		trigger = combo.Key
+	}
+	pressed := func() bool {
 		ctrl, alt, shift := ModifiersDown()
 		left, _, _ := procGetAsyncKeyState.Call(0x5B)
 		right, _, _ := procGetAsyncKeyState.Call(0x5C)
+		if trigger != 0 {
+			key, _, _ := procGetAsyncKeyState.Call(uintptr(trigger))
+			if int16(key) < 0 {
+				return true
+			}
+		}
 		return ctrl || alt || shift || int16(left) < 0 || int16(right) < 0
-	}, func() error {
+	}
+	sameSource := func() bool { current, _, _ := procGetForegroundWindow.Call(); return current == source }
+	var before clipboardSnapshot
+	copySelection := func() error {
+		if !sameSource() {
+			return errors.New("取词窗口已切换，请重新选中文字")
+		}
 		var err error
 		before, err = snapshotClipboard()
 		if err != nil {
 			return err
 		}
-		return sendCopyInput()
-	}); err != nil {
-		return "", err
+		if !sameSource() {
+			return errors.New("取词窗口已切换，请重新选中文字")
+		}
+		return sendCopyInput(hotkey)
 	}
-
-	grabbed := ""
+	if hotkey != "" {
+		if err := copySelection(); err != nil {
+			return "", err
+		}
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+		defer cancel()
+		if err := copyWhenReleased(ctx, pressed, copySelection); err != nil {
+			return "", err
+		}
+	}
 	var observedSequence uint32
-	deadline := time.Now().Add(wait)
+	defer func() {
+		if observedSequence != 0 {
+			if err := writeClipboardFormats(before.items, &observedSequence); err != nil && !errors.Is(err, errClipboardChanged) {
+				logx.Warn("clipboard restore fail: %v", err)
+			}
+		}
+	}()
+	start := time.Now()
+	deadline := start.Add(wait)
+	retryAt := start.Add(min(250*time.Millisecond, wait/2))
+	attempts := 1
 	for time.Now().Before(deadline) {
 		time.Sleep(30 * time.Millisecond)
-		if ClipboardSeq() == before.sequence {
-			continue
+		if !sameSource() {
+			return "", errors.New("取词窗口已切换，请重新选中文字")
 		}
+		// GetClipboardData renders delayed text before its sequence can advance.
 		text, sequence, err := readClipboardTextWithSequence()
-		if sequence == 0 || sequence == before.sequence {
-			continue
+		if !sameSource() {
+			return "", errors.New("取词窗口已切换，请重新选中文字")
 		}
-		observedSequence = sequence
-		if err != nil {
-			continue
+		if sequence != 0 && sequence != before.sequence {
+			observedSequence = sequence
+			if err == nil && text != "" {
+				logx.Info("selection captured: attempts=%d", attempts)
+				return text, nil
+			}
 		}
-		if text != "" {
-			grabbed = text
-			break
+		if attempts == 1 && !time.Now().Before(retryAt) && !pressed() {
+			if !sameSource() {
+				return "", errors.New("取词窗口已切换，请重新选中文字")
+			}
+			if err := sendCopyInput(""); err != nil {
+				return "", err
+			}
+			attempts++
 		}
 	}
-	if observedSequence != 0 {
-		if err := writeClipboardFormats(before.items, &observedSequence); err != nil && !errors.Is(err, errClipboardChanged) {
-			logx.Warn("clipboard restore fail: %v", err)
-		}
-	}
-	if grabbed == "" {
-		return "", errors.New("no selection captured")
-	}
-	return grabbed, nil
+	logx.Warn("selection not captured: attempts=%d", attempts)
+	return "", errors.New("no selection captured")
 }
 
 // Screenshot 全屏截图，返回 PNG 字节

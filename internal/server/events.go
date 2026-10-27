@@ -155,7 +155,7 @@ func FireHotkey(app *App, name string) {
 	switch name {
 	case "selection":
 		go func() {
-			text, err := capture.SelectedText(1200 * time.Millisecond)
+			text, err := capture.SelectedText(1200*time.Millisecond, app.Config().Hotkeys.Selection)
 			if err != nil {
 				app.showResult(Result{Text: "取词失败：" + err.Error(), Provider: "错误"})
 				return

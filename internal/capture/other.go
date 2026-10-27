@@ -22,7 +22,7 @@ func ReadClipboard() (string, error) { return "", errUnsupported }
 func WriteClipboard(string) error { return errUnsupported }
 
 // SelectedText 取选中文本
-func SelectedText(any) (string, error) { return "", errUnsupported }
+func SelectedText(any, string) (string, error) { return "", errUnsupported }
 
 // Screenshot 全屏截图
 func Screenshot() ([]byte, error) { return nil, errUnsupported }
