@@ -21,7 +21,13 @@ var procEnumClipboardFormats nativeProcedure = user32.NewProc("EnumClipboardForm
 var procGlobalSize = kernel32.NewProc("GlobalSize")
 var errClipboardChanged = errors.New("剪贴板已有新内容，保留用户的新复制")
 
-const clipboardMaxBytes = 64 << 20
+const (
+	clipboardMaxBytes = 64 << 20
+	cfBitmap          = 2
+	cfDIB             = 8
+	cfPalette         = 9
+	cfDIBV5           = 17
+)
 
 type clipboardItem struct {
 	format uint32
@@ -90,6 +96,7 @@ func snapshotClipboard() (clipboardSnapshot, error) {
 	defer procCloseClipboard.Call()
 	var format uintptr
 	total := 0
+	hasImageHandle, hasDIB := false, false
 	for {
 		kernel32.NewProc("SetLastError").Call(0)
 		next, _, err := procEnumClipboardFormats.Call(format)
@@ -99,10 +106,15 @@ func snapshotClipboard() (clipboardSnapshot, error) {
 			}
 			break
 		}
+		format = next
+		// Windows reconstructs bitmap/palette handles from the preserved DIB bytes.
+		if format == cfBitmap || format == cfPalette {
+			hasImageHandle = true
+			continue
+		}
 		if len(snapshot.items) >= 256 {
 			return snapshot, errors.New("剪贴板格式过多，已停止划词")
 		}
-		format = next
 		data, err := readClipboardBlock(uint32(format))
 		if err != nil {
 			return snapshot, err
@@ -112,6 +124,22 @@ func snapshotClipboard() (clipboardSnapshot, error) {
 			return snapshot, errors.New("剪贴板快照超过 64 MiB，已停止划词")
 		}
 		snapshot.items = append(snapshot.items, clipboardItem{uint32(format), data})
+		hasDIB = hasDIB || format == cfDIB || format == cfDIBV5
+	}
+	if hasImageHandle && !hasDIB {
+		imageFormat := uint32(cfDIBV5)
+		data, err := readClipboardBlock(imageFormat)
+		if err != nil {
+			imageFormat = cfDIB
+			data, err = readClipboardBlock(imageFormat)
+		}
+		if err != nil {
+			return snapshot, err
+		}
+		if len(snapshot.items) >= 256 || total+len(data) > clipboardMaxBytes {
+			return snapshot, errors.New("剪贴板图片快照超过安全限制，已停止划词")
+		}
+		snapshot.items = append(snapshot.items, clipboardItem{imageFormat, data})
 	}
 	snapshot.sequence = ClipboardSeq()
 	if snapshot.sequence == 0 {

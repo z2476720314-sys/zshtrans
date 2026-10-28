@@ -12,7 +12,7 @@ import (
 
 const (
 	AppName    = "ZSH TRANS"
-	AppVersion = "v3.5.1"
+	AppVersion = "v3.5.2"
 	// 原 pyc 常量
 	Timeout  = 8
 	CacheMax = 300
